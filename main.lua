@@ -1,4 +1,4 @@
-﻿local Device = require("device")
+local Device = require("device")
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local UIManager = require("ui/uimanager")
@@ -6940,17 +6940,6 @@ function AppStore:showAppStoreSettingsDialog()
     
     table.insert(buttons, {
         {
-            text = _("Clear cached README files"),
-            background = Blitbuffer.COLOR_WHITE,
-            callback = function()
-                UIManager:close(dialog)
-                self:clearCachedReadmeFiles()
-            end,
-        },
-    })
-    
-    table.insert(buttons, {
-        {
             text = _("Close"),
             background = Blitbuffer.COLOR_WHITE,
             callback = function()
@@ -6965,34 +6954,6 @@ function AppStore:showAppStoreSettingsDialog()
         buttons = buttons,
     }
     UIManager:show(dialog)
-end
-
--- Triggered from the AppStore settings dialog. Confirms with the user, then
--- removes every cached README markdown file produced by previous
--- "View README" actions. The cached files are regenerated on demand the next
--- time a README is opened, so deletion is non-destructive.
-function AppStore:clearCachedReadmeFiles()
-    local confirm
-    confirm = ConfirmBox:new{
-        text = _("Delete all cached README files? They will be re-downloaded on demand."),
-        ok_text = _("Delete"),
-        cancel_text = _("Cancel"),
-        ok_callback = function()
-            local result = RepoContent.clearReadmeCache()
-            local removed = (result and result.removed) or 0
-            local errors = (result and result.errors) or {}
-            local msg
-            if removed == 0 and #errors == 0 then
-                msg = _("No cached README files to delete.")
-            elseif #errors == 0 then
-                msg = string.format(_("Deleted %d cached README file(s)."), removed)
-            else
-                msg = string.format(_("Deleted %d cached README file(s); %d failed."), removed, #errors)
-            end
-            UIManager:show(InfoMessage:new{ text = msg, timeout = 4 })
-        end,
-    }
-    UIManager:show(confirm)
 end
 
 function AppStore:promptInstallPluginFromURL()
@@ -7957,16 +7918,20 @@ function AppStore:showReadme(repo)
         return
     end
     NetworkMgr:runWhenOnline(function()
-        local ok, path_or_err = RepoContent.fetchReadme(owner, repo.name)
-        if not ok then
-            UIManager:show(InfoMessage:new{ text = _("README download failed: ") .. tostring(path_or_err), timeout = 4 })
+        local content, err = RepoContent.fetchReadme(owner, repo.name)
+        if not content then
+            UIManager:show(InfoMessage:new{ text = _("README download failed: ") .. tostring(err), timeout = 4 })
             return
         end
         self:closeBrowserMenu()
-        RepoContent.openReadme(path_or_err)
+        UIManager:show(TextViewer:new{
+            title = string.format(_("README: %s/%s"), owner, repo.name),
+            text = content,
+            add_default_buttons = true,
+            text_format = "md",
+        })
     end)
 end
-
 local function appendUniqueRepo(target, seen, repo)
     if type(repo) ~= "table" then
         return
@@ -8342,4 +8307,3 @@ end
 
 
 return AppStore
-
