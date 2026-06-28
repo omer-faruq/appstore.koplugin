@@ -7923,7 +7923,6 @@ function AppStore:showReadme(repo)
             UIManager:show(InfoMessage:new{ text = _("README download failed: ") .. tostring(err), timeout = 4 })
             return
         end
-        self:closeBrowserMenu()
         UIManager:show(TextViewer:new{
             title = string.format(_("README: %s/%s"), owner, repo.name),
             text = content,
