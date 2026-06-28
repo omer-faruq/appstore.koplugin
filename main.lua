@@ -7932,6 +7932,7 @@ function AppStore:showReadme(repo)
         })
     end)
 end
+
 local function appendUniqueRepo(target, seen, repo)
     if type(repo) ~= "table" then
         return
@@ -8307,3 +8308,4 @@ end
 
 
 return AppStore
+
