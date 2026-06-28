@@ -40,6 +40,8 @@ function RepoContent.fetchReadme(owner, repo)
     if not body or body == "" then
         return nil, "empty body"
     end
+    -- Strip inline HTML <img> tags to avoid rendering issues in the text viewer.
+    -- This keeps the textual README content while dropping embedded images.
     body = body:gsub("<img[^>]->", "")
     return body, nil
 end
