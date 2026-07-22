@@ -216,3 +216,7 @@ You can also browse the repository list from your PC browser by visiting [https:
 ## Credits
 
 This plugin and documentation were prepared with Windsurf (AI).
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0). See the [LICENSE](LICENSE) file for details.
