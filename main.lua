@@ -33,7 +33,7 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local RightContainer = require("ui/widget/container/rightcontainer")
 local OverlapGroup = require("ui/widget/overlapgroup")
-local _ = require("gettext")
+local _ = require("appstore_gettext")
 
 local Input = Device.input
 

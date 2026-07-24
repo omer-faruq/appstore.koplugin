@@ -213,6 +213,36 @@ The AppStore plugin is fully usable on devices without a touchscreen. The browse
 
 You can also browse the repository list from your PC browser by visiting [https://omer-faruq.github.io/appstore.koplugin/](https://omer-faruq.github.io/appstore.koplugin/), or by downloading and opening the `docs/index.html` file locally.
 
+## Localization
+
+The plugin UI can be shown in the language selected in KOReader (**Settings → Language**).
+Bundled translations: Simplified Chinese (`zh_CN`), Turkish (`tr`), Spanish (`es`),
+French (`fr`), German (`de`), Brazilian Portuguese (`pt_BR`). Any untranslated string
+falls back to English, and an unsupported language shows the full English UI.
+
+Translations live in `l10n/<code>.lua`, plain Lua tables mapping the English source
+string to its translation. The plugin loads them through `appstore_gettext.lua`, a
+drop-in wrapper around KOReader's `gettext` (needed because the core catalog does not
+cover standalone plugins). The active language is read once at startup; changing the
+UI language restarts KOReader, so the new catalog is picked up on the next launch.
+
+### Adding or updating a language
+
+Tools live in `l10n/tools/` (run with the LuaJIT that ships with KOReader, or any LuaJIT):
+
+```
+# 1. Regenerate the English key template after changing source strings
+luajit l10n/tools/extract.lua main.lua appstore_updates.lua appstore_repo_content.lua _meta.lua > l10n/template.lua
+
+# 2. Copy template.lua to l10n/<code>.lua (matching KOReader's locale code) and translate the values
+
+# 3. Verify keys and %s/%d placeholders match the source
+luajit l10n/tools/validate.lua l10n/template.lua l10n/<code>.lua
+```
+
+Keep the keys byte-for-byte identical to the source strings (including `%s`/`%d`
+placeholders, newlines and characters such as `→ · — ≥ ⭐ …`) — only the values change.
+
 ## Credits
 
 This plugin and documentation were prepared with Windsurf (AI).

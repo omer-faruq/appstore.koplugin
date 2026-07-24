@@ -1,4 +1,4 @@
-﻿local _ = require("gettext")
+﻿local _ = require("appstore_gettext")
 
 return {
     name = "appstore",
