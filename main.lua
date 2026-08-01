@@ -7729,17 +7729,19 @@ function AppStore:showAppStoreSettingsDialog()
         })
     end
     
-    table.insert(buttons, {
-        {
-            text = _("Clear cached README files"),
-            background = Blitbuffer.COLOR_WHITE,
-            callback = function()
-                UIManager:close(dialog)
-                self:clearCachedReadmeFiles()
-            end,
-        },
-    })
-    
+    if not RepoContent.supportsReadmePopup() then
+        table.insert(buttons, {
+            {
+                text = _("Clear cached README files"),
+                background = Blitbuffer.COLOR_WHITE,
+                callback = function()
+                    UIManager:close(dialog)
+                    self:clearCachedReadmeFiles()
+                end,
+            },
+        })
+    end
+
     table.insert(buttons, {
         {
             text = _("Close"),
@@ -8891,6 +8893,20 @@ function AppStore:showReadme(repo)
         return
     end
     NetworkMgr:runWhenOnline(function()
+        if RepoContent.supportsReadmePopup() then
+            local content, err = RepoContent.fetchReadmeContent(owner, repo.name)
+            if not content then
+                UIManager:show(InfoMessage:new{ text = _("README download failed: ") .. tostring(err), timeout = 4 })
+                return
+            end
+            UIManager:show(TextViewer:new{
+                title = string.format(_("README: %s/%s"), owner, repo.name),
+                text = content,
+                add_default_buttons = true,
+                text_format = "md",
+            })
+            return
+        end
         local ok, path_or_err = RepoContent.fetchReadme(owner, repo.name)
         if not ok then
             UIManager:show(InfoMessage:new{ text = _("README download failed: ") .. tostring(path_or_err), timeout = 4 })
