@@ -1,4 +1,4 @@
-﻿local DataStorage = require("datastorage")
+local DataStorage = require("datastorage")
 local SQ3 = require("lua-ljsqlite3/init")
 local ffiUtil = require("ffi/util")
 local util = require("util")
@@ -53,21 +53,34 @@ local function ensureDirectory()
     end
 end
 
+local db_conn = nil
+
 local function openConnection()
     ensureDirectory()
-    local conn = SQ3.open(DB_PATH)
-    conn:exec("PRAGMA journal_mode = WAL;")
-    conn:exec("PRAGMA synchronous = NORMAL;")
-    conn:exec("PRAGMA foreign_keys = ON;")
-    return conn
+    if not db_conn then
+        local conn = SQ3.open(DB_PATH)
+        conn:exec("PRAGMA journal_mode = WAL;")
+        conn:exec("PRAGMA synchronous = NORMAL;")
+        conn:exec("PRAGMA foreign_keys = ON;")
+        db_conn = conn
+    end
+    return db_conn
+end
+
+function Cache.close()
+    if db_conn then
+        pcall(function() db_conn:close() end)
+        db_conn = nil
+    end
+    initialized = false
 end
 
 local function withConnection(fn)
     Cache.init()
     local conn = openConnection()
     local ok, result = pcall(fn, conn)
-    conn:close()
     if not ok then
+        Cache.close()
         error(result)
     end
     return result
@@ -279,14 +292,12 @@ function Cache.init()
     local conn = openConnection()
     local current_version = tonumber(conn:rowexec("PRAGMA user_version;")) or 0
     if current_version < DB_SCHEMA_VERSION then
-        conn:exec("PRAGMA writable_schema = ON;")
-        conn:exec("DELETE FROM sqlite_master WHERE type IN ('table','index','trigger');")
-        conn:exec("PRAGMA writable_schema = OFF;")
+        conn:exec("DROP TABLE IF EXISTS repos;")
+        conn:exec("DROP TABLE IF EXISTS patch_files;")
         conn:exec("VACUUM;")
         conn:exec("PRAGMA user_version = " .. DB_SCHEMA_VERSION .. ";")
     end
     execStatements(conn, SCHEMA_STATEMENTS)
-    conn:close()
     initialized = true
 end
 

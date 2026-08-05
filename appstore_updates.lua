@@ -1,4 +1,4 @@
-﻿local Device = require("device")
+local Device = require("device")
 local UIManager = require("ui/uimanager")
 local Font = require("ui/font")
 local InputContainer = require("ui/widget/container/inputcontainer")

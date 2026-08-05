@@ -1,9 +1,10 @@
-﻿local DataStorage = require("datastorage")
+local DataStorage = require("datastorage")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local FileManager = require("apps/filemanager/filemanager")
 local _ = require("appstore_gettext")
 local http = require("socket.http")
+local socketutil = require("socketutil")
 local ltn12 = require("ltn12")
 local util = require("util")
 local logger = require("logger")
@@ -32,16 +33,20 @@ local function buildRawUrl(owner, repo)
     return string.format("https://raw.githubusercontent.com/%s/%s/HEAD/README.md", owner, repo)
 end
 
+-- Timeouts are mandatory here: this runs synchronously on the UI thread, so a
+-- stalled socket freezes the reader with no way to dismiss it.
 local function download(url)
     local response = {}
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local _, code = http.request{
         url = url,
-        sink = ltn12.sink.table(response),
+        sink = socketutil.table_sink(response),
         headers = {
             ["Accept"] = "text/plain",
             ["User-Agent"] = "KOReader-AppStore",
         },
     }
+    socketutil:reset_timeout()
     return tonumber(code), table.concat(response)
 end
 

@@ -1,4 +1,4 @@
-﻿local DataStorage = require("datastorage")
+local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local json = require("json")
 local logger = require("logger")
