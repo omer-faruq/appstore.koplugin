@@ -25,7 +25,7 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local OverlapGroup = require("ui/widget/overlapgroup")
-local Spinner = require("ui/widget/spinner")
+local GestureRange = require("ui/gesturerange")
 
 local _ = require("appstore_gettext")
 local Input = Device.input
@@ -170,13 +170,13 @@ function AppStoreListItem:init()
         self.ges_events = {
             AppStoreTap = {
                 GestureRange:new{
-                    gesture = "tap",
+                    ges = "tap",
                     range = self.dimen,
                 },
             },
             AppStoreHold = {
                 GestureRange:new{
-                    gesture = "hold",
+                    ges = "hold",
                     range = self.dimen,
                 },
             },

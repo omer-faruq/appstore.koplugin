@@ -128,7 +128,7 @@ end
 local NetworkMgr = require("ui/network/manager")
 
 local function request(path, query)
-    if NetworkMgr and NetworkMgr.willWork and not NetworkMgr:willWork() then
+    if NetworkMgr and NetworkMgr.isOnline and not NetworkMgr:isOnline() then
         logger.dbg("AppStore HTTP offline check failed", path)
         return 0, "offline"
     end

@@ -13,7 +13,6 @@ local logger = require("logger")
 local _ = require("appstore_gettext")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
-local Spinner = require("ui/widget/spinner")
 local PluginPaths = require("appstore_plugin_paths")
 
 local AppStoreInstaller = {}
@@ -85,6 +84,11 @@ function AppStoreInstaller.downloadToFile(url, local_path)
         })
         socketutil:reset_timeout()
 
+        if file then
+            pcall(function() file:close() end)
+            file = nil
+        end
+
         if code == socketutil.TIMEOUT_CODE
             or code == socketutil.SSL_HANDSHAKE_CODE
             or code == socketutil.SINK_TIMEOUT_CODE then
@@ -134,14 +138,11 @@ function AppStoreInstaller.fetchGitHubRaw(owner, repo, path, branch)
     branch = branch or "HEAD"
     local download_url = AppStoreInstaller.buildPatchDownloadUrl(owner, repo, branch, path)
     local response_body = {}
-    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local request = {
         url = download_url,
         method = "GET",
-        sink = function(chunk, err)
-            if chunk then table.insert(response_body, chunk) end
-            return 1, err
-        end,
+        sink = socketutil.table_sink(response_body),
         redirect = true,
         headers = {
             ["User-Agent"] = socketutil.USER_AGENT,
@@ -149,7 +150,7 @@ function AppStoreInstaller.fetchGitHubRaw(owner, repo, path, branch)
     }
     local code, headers, status = socket.skip(1, http.request(request))
     socketutil:reset_timeout()
-    if code ~= 200 then
+    if tonumber(code) ~= 200 then
         return nil, status or tostring(code)
     end
     return table.concat(response_body), nil
@@ -163,6 +164,8 @@ function AppStoreInstaller.canonicalizePath(path)
         if part == ".." then
             if #parts > 0 and parts[#parts] ~= ".." then
                 table.remove(parts)
+            else
+                table.insert(parts, "..")
             end
         elseif part ~= "." and part ~= "" then
             table.insert(parts, part)
@@ -182,6 +185,90 @@ function AppStoreInstaller.isSubPath(parent, child)
         norm_parent = norm_parent .. "/"
     end
     return norm_child:sub(1, #norm_parent) == norm_parent
+end
+
+function AppStoreInstaller.sanitizePluginDirname(name)
+    name = name or "plugin"
+    name = util.trim(name)
+    if name == "" then
+        name = "plugin"
+    end
+    name = name:gsub("[^%w_%-%.]", "_")
+    if not name:match("%.koplugin$") then
+        name = name .. ".koplugin"
+    end
+    return name
+end
+
+function AppStoreInstaller.detectPluginFromArchive(reader, repo)
+    local plugin_root
+    local plugin_dirname
+    local meta_entry_path
+
+    for entry in reader:iterate() do
+        if entry.mode == "file" and entry.path:match("^_meta%.lua$") then
+            meta_entry_path = entry.path
+            plugin_root = ""
+        elseif entry.mode == "file" and entry.path:match("%.koplugin/_meta%.lua$") then
+            meta_entry_path = entry.path
+            plugin_root = entry.path:match("(.+%.koplugin)/_meta%.lua$")
+            if plugin_root then
+                plugin_dirname = plugin_root:match("([^/]+%.koplugin)$")
+            end
+            break
+        elseif not meta_entry_path and entry.mode == "file" and entry.path:match("/_meta%.lua$") then
+            meta_entry_path = entry.path
+            plugin_root = entry.path:match("(.+)/_meta%.lua$")
+        end
+    end
+
+    if not plugin_root or not meta_entry_path then
+        return nil, _("Could not locate plugin folder (_meta.lua) in archive.")
+    end
+
+    local meta_source = reader:extractToMemory(meta_entry_path)
+    local plugin_name
+    local plugin_version
+    if meta_source and type(meta_source) == "string" then
+        plugin_name = meta_source:match('name%s*=%s*["\']([^"\']+)["\']')
+        plugin_version = meta_source:match('version%s*=%s*["\']([^"\']+)["\']')
+    end
+
+    if not plugin_dirname then
+        local repo_name = repo and repo.name
+        local repo_is_plugin_dir = repo_name and repo_name:match("^[%w_%-%.]+%.koplugin$") ~= nil
+
+        if repo_is_plugin_dir then
+            plugin_dirname = repo_name
+        elseif plugin_root and plugin_root ~= "" then
+            local root_basename = plugin_root:match("([^/]+)$")
+            if root_basename and root_basename:match("%.koplugin") then
+                local extracted = root_basename:match("([%w_%-%.]+%.koplugin)")
+                if extracted then
+                    plugin_dirname = extracted
+                end
+            end
+        end
+
+        if not plugin_dirname then
+            if plugin_name and plugin_name ~= "" then
+                plugin_dirname = AppStoreInstaller.sanitizePluginDirname(plugin_name)
+            elseif repo_name then
+                plugin_dirname = AppStoreInstaller.sanitizePluginDirname(repo_name)
+            else
+                plugin_dirname = AppStoreInstaller.sanitizePluginDirname("appstore")
+            end
+        end
+    elseif not plugin_name or plugin_name == "" then
+        plugin_name = plugin_dirname:gsub("%.koplugin$", "")
+    end
+
+    return {
+        plugin_root = plugin_root,
+        plugin_dirname = plugin_dirname,
+        plugin_name = plugin_name,
+        plugin_version = plugin_version,
+    }, nil
 end
 
 function AppStoreInstaller.extractPluginToUserDir(reader, info, dest_root)
@@ -299,15 +386,16 @@ function AppStoreInstaller.extractPluginToUserDir(reader, info, dest_root)
 end
 
 function AppStoreInstaller.showSpinner(title)
-    local spinner = Spinner:new{ text = title or _("Working…") }
-    UIManager:show(spinner)
-    return spinner
+    local info = InfoMessage:new{ text = title or _("Working…"), timeout = 0 }
+    UIManager:show(info)
+    return info
 end
 
-function AppStoreInstaller.closeSpinner(spinner)
-    if spinner then
-        UIManager:close(spinner)
+function AppStoreInstaller.closeSpinner(info)
+    if info then
+        UIManager:close(info)
     end
 end
 
 return AppStoreInstaller
+

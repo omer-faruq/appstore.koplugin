@@ -9,7 +9,6 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
 local ButtonDialog = require("ui/widget/buttondialog")
-local SpinWidget = require("ui/widget/spinwidget")
 local Dispatcher = require("dispatcher")
 local Blitbuffer = require("ffi/blitbuffer")
 local util = require("util")
@@ -30,14 +29,6 @@ local ManageUI = require("appstore_manage_ui")
 local SETTINGS_PATH = DataStorage:getSettingsDir() .. "/appstore.lua"
 local AppStoreSettings = LuaSettings:open(SETTINGS_PATH)
 
-local ALLOW_DELETE_UNLINKED_PLUGINS_KEY = "allow_delete_unlinked_plugins"
-local ALLOW_DELETE_UNLINKED_PATCHES_KEY = "allow_delete_unlinked_patches"
-local BROWSER_PAGE_SIZE_KEY = "browser_page_size"
-local MANAGE_PAGE_SIZE_KEY = "manage_page_size"
-local DEFAULT_BROWSER_PAGE_SIZE = 14
-local DEFAULT_MANAGE_PAGE_SIZE = 7
-local MIN_BROWSER_PAGE_SIZE = 4
-local MAX_BROWSER_PAGE_SIZE = 100
 local PLUGIN_TOPICS = { "koreader-plugin" }
 local PATCH_TOPICS = { "koreader-user-patch" }
 local PLUGIN_NAME_QUERIES = { 'in:name ".koplugin"' }
@@ -47,12 +38,9 @@ local AppStore = WidgetContainer:extend{
     name = "appstore",
     is_doc_only = false,
     is_refreshing = false,
-    browser_state = nil,
+    current_kind = "plugin",
     browser_menu = nil,
-    patch_cache = {},
-    updates_state = nil,
     updates_menu = nil,
-    patch_updates_state = nil,
     patch_updates_menu = nil,
 }
 
@@ -108,35 +96,159 @@ local function showRestartConfirmation(message)
     })
 end
 
+function AppStore:fetchAndStore(kind, topics, name_queries)
+    local collected = {}
+    local seen = {}
+    local function append(repo)
+        if repo and repo.id and not seen[repo.id] then
+            seen[repo.id] = true
+            table.insert(collected, repo)
+        end
+    end
+
+    if topics then
+        local res, err = GitHub.searchByTopics(topics, { per_page = 100 })
+        if res and res.items then
+            for _, repo in ipairs(res.items) do
+                append(repo)
+            end
+        end
+    end
+
+    if name_queries then
+        for _, q in ipairs(name_queries) do
+            local res, err = GitHub.searchRepositories({ q = q, per_page = 100 })
+            if res and res.items then
+                for _, repo in ipairs(res.items) do
+                    append(repo)
+                end
+            end
+        end
+    end
+
+    Cache.storeRepos(kind, collected)
+    return #collected
+end
+
+function AppStore:refreshCache(kind)
+    if self.is_refreshing then return end
+    kind = kind or self.current_kind or "plugin"
+    self.is_refreshing = true
+    local progress = InfoMessage:new{ text = _("Refreshing catalog…"), timeout = 0 }
+    UIManager:show(progress)
+
+    local ok, err = pcall(function()
+        if kind == "plugin" or kind == "all" then
+            self:fetchAndStore("plugin", PLUGIN_TOPICS, PLUGIN_NAME_QUERIES)
+        end
+        if kind == "patch" or kind == "all" then
+            self:fetchAndStore("patch", PATCH_TOPICS, PATCH_NAME_QUERIES)
+        end
+    end)
+
+    UIManager:close(progress)
+    self.is_refreshing = false
+
+    if ok then
+        UIManager:show(InfoMessage:new{ text = _("Catalog updated successfully."), timeout = 3 })
+    else
+        UIManager:show(InfoMessage:new{ text = _("Catalog update failed: ") .. tostring(err), timeout = 5 })
+    end
+end
+
 function AppStore:showBrowser(kind)
     kind = kind or "plugin"
-    GitHub.runWhenOnline(function()
-        local spinner = Installer.showSpinner(_("Loading repositories…"))
-        UIManager:nextTick(function()
-            local repos = Cache.listRepos(kind)
-            Installer.closeSpinner(spinner)
-            local items = {}
-            for _, repo in ipairs(repos) do
-                table.insert(items, {
-                    text = string.format("• %s\n  %s", repo.full_name or repo.name, repo.description or ""),
-                    is_entry = true,
-                    callback = function()
-                        self:promptRepoAction(repo)
-                    end,
-                })
-            end
-            local dialog = BrowserUI.AppStoreBrowserDialog:new{
-                title = kind == "plugin" and _("App Store · Plugins") or _("App Store · Patches"),
-                items = items,
-                appstore = self,
-                on_settings_tap = function()
+    self.current_kind = kind
+    local repos = Cache.listRepos(kind)
+    if #repos == 0 then
+        GitHub.runWhenOnline(function()
+            self:refreshCache(kind)
+            repos = Cache.listRepos(kind)
+            self:renderBrowserDialog(kind, repos)
+        end)
+        return
+    end
+    self:renderBrowserDialog(kind, repos)
+end
+
+function AppStore:renderBrowserDialog(kind, repos)
+    local items = {}
+    for _, repo in ipairs(repos) do
+        table.insert(items, {
+            text = string.format("• %s\n  %s", repo.full_name or repo.name, repo.description or ""),
+            is_entry = true,
+            callback = function()
+                self:promptRepoAction(repo)
+            end,
+        })
+    end
+    local dialog = BrowserUI.AppStoreBrowserDialog:new{
+        title = kind == "plugin" and _("App Store · Plugins") or _("App Store · Patches"),
+        items = items,
+        appstore = self,
+        on_settings_tap = function()
+            self:showAppStoreSettingsDialog()
+        end,
+    }
+    self.browser_menu = dialog
+    UIManager:show(dialog)
+end
+
+function AppStore:showBrowserActionMenu(dialog)
+    local button_dialog
+    local buttons = {
+        {
+            {
+                text = _("Refresh catalog"),
+                callback = function()
+                    if button_dialog then UIManager:close(button_dialog) end
+                    if dialog then UIManager:close(dialog) end
+                    GitHub.runWhenOnline(function()
+                        self:refreshCache(self.current_kind or "plugin")
+                        self:showBrowser(self.current_kind or "plugin")
+                    end)
+                end,
+            },
+            {
+                text = (self.current_kind == "patch") and _("Switch to Plugins") or _("Switch to Patches"),
+                callback = function()
+                    if button_dialog then UIManager:close(button_dialog) end
+                    if dialog then UIManager:close(dialog) end
+                    local target_kind = (self.current_kind == "patch") and "plugin" or "patch"
+                    self:showBrowser(target_kind)
+                end,
+            },
+        },
+        {
+            {
+                text = _("Installed plugins"),
+                callback = function()
+                    if button_dialog then UIManager:close(button_dialog) end
+                    self:showUpdatesDialog()
+                end,
+            },
+            {
+                text = _("Settings"),
+                callback = function()
+                    if button_dialog then UIManager:close(button_dialog) end
                     self:showAppStoreSettingsDialog()
                 end,
-            }
-            self.browser_menu = dialog
-            UIManager:show(dialog)
-        end)
-    end)
+            },
+        },
+        {
+            {
+                text = _("Close"),
+                callback = function()
+                    if button_dialog then UIManager:close(button_dialog) end
+                end,
+            },
+        },
+    }
+    button_dialog = ButtonDialog:new{
+        title = _("App Store Menu"),
+        buttons = buttons,
+    }
+    UIManager:show(button_dialog)
 end
 
 function AppStore:promptRepoAction(repo)
@@ -217,9 +329,16 @@ function AppStore:installPluginFromRepo(repo)
                 UIManager:show(InfoMessage:new{ text = _("Failed to open downloaded archive."), timeout = 5 })
                 return
             end
+            local info, err_detect = Installer.detectPluginFromArchive(reader, repo)
+            if not info then
+                reader:close()
+                util.removeFile(zip_path)
+                UIManager:show(InfoMessage:new{ text = err_detect or _("Failed to detect plugin structure in archive."), timeout = 5 })
+                return
+            end
             local extract_spinner = Installer.showSpinner(_("Installing plugin…"))
             UIManager:nextTick(function()
-                local ok_extract, target_dir = Installer.extractPluginToUserDir(reader, { plugin_dirname = repo.name .. ".koplugin", plugin_root = "" })
+                local ok_extract, target_dir = Installer.extractPluginToUserDir(reader, info)
                 reader:close()
                 util.removeFile(zip_path)
                 Installer.closeSpinner(extract_spinner)
@@ -227,7 +346,7 @@ function AppStore:installPluginFromRepo(repo)
                     UIManager:show(InfoMessage:new{ text = _("Installation failed: ") .. tostring(target_dir), timeout = 5 })
                     return
                 end
-                showRestartConfirmation(string.format(_("Installed plugin '%s'."), repo.name))
+                showRestartConfirmation(string.format(_("Installed plugin '%s'."), info.plugin_name or repo.name))
             end)
         end)
     end)
@@ -309,3 +428,4 @@ function AppStore:showAppStoreSettingsDialog()
 end
 
 return AppStore
+
