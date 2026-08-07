@@ -311,7 +311,6 @@ function Cache.storeRepos(kind, repos)
         return
     end
     local fetched_at = os.time()
-    last_fetched_cache[kind] = fetched_at
     withConnection(function(conn)
         conn:exec("BEGIN;")
         local delete_stmt = conn:prepare([[DELETE FROM repos WHERE kind = ?;]])
@@ -352,6 +351,8 @@ function Cache.storeRepos(kind, repos)
         stmt:close()
         conn:exec("COMMIT;")
     end)
+    -- Only once the rows are in: an empty refresh must keep reading as empty.
+    last_fetched_cache[kind] = #repos > 0 and fetched_at or nil
 end
 
 local function decodeData(raw, context)
