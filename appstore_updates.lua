@@ -60,6 +60,9 @@ function UpdatesListItem:init()
         background = background,
         text_widget,
     }
+    -- See AppStoreListItem:init in main.lua.
+    self._focus_bar = not Device:isTouchDevice()
+    self._focus_bar_background = background
     self[1] = self.frame
     self.dimen = self.frame:getSize()
 
@@ -87,7 +90,44 @@ function UpdatesListItem:isFocusable()
     return self.entry and self.entry.callback ~= nil
 end
 
+-- Screen coordinates, so only once painted.
+function UpdatesListItem:getFocusIndicatorRegion()
+    if not (self._focus_bar and self._painted and self.dimen) then
+        return
+    end
+    local h = math.min(Size.line.focus_indicator or Size.line.thick, math.max(self.dimen.h, 1))
+    return Geom:new{
+        x = self.dimen.x,
+        y = self.dimen.y + self.dimen.h - h,
+        w = self.dimen.w,
+        h = h,
+    }
+end
+
+function UpdatesListItem:repaintFocusIndicator(bb)
+    local region = self:getFocusIndicatorRegion()
+    if not region then
+        return false
+    end
+    bb:paintRect(region.x, region.y, region.w, region.h,
+        self._focused and Blitbuffer.COLOR_BLACK or (self._focus_bar_background or Blitbuffer.COLOR_WHITE))
+    return true
+end
+
+function UpdatesListItem:paintTo(bb, x, y)
+    InputContainer.paintTo(self, bb, x, y)
+    self._painted = true
+    if self._focus_bar and self._focused then
+        self:repaintFocusIndicator(bb)
+    end
+end
+
 function UpdatesListItem:onFocus()
+    if self._focus_bar then
+        self._focused = true
+        -- No setDirty: a region-less one would swallow FocusManager's narrow repaint.
+        return true
+    end
     if not self.frame then
         return true
     end
@@ -97,6 +137,10 @@ function UpdatesListItem:onFocus()
 end
 
 function UpdatesListItem:onUnfocus()
+    if self._focus_bar then
+        self._focused = false
+        return true
+    end
     if not self.frame then
         return true
     end
