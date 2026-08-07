@@ -6277,15 +6277,24 @@ end
 local function repoUpdatedValue(repo)
     -- For ordering, only consider pushed_at (last pushed commit).
     -- Repos with no pushes get value 0 and sink to the bottom.
-    if repo.data and repo.data.pushed_at then
-        return parseGitHubTimestamp(repo.data.pushed_at)
+    -- Column first: this runs for every comparison of every sort.
+    local pushed_at = repo.pushed_at
+    if pushed_at == nil then
+        pushed_at = repo.data and repo.data.pushed_at
+    end
+    if pushed_at and pushed_at ~= "" then
+        return parseGitHubTimestamp(pushed_at)
     end
     return 0
 end
 
 local function repoCreatedValue(repo)
-    if repo.data and repo.data.created_at then
-        return parseGitHubTimestamp(repo.data.created_at)
+    local created_at = repo.created_at
+    if created_at == nil then
+        created_at = repo.data and repo.data.created_at
+    end
+    if created_at and created_at ~= "" then
+        return parseGitHubTimestamp(created_at)
     end
     return 0
 end
@@ -6847,7 +6856,10 @@ local function formatRepoEntry(repo, opts)
     if include_description and description ~= "" then
         table.insert(lines, "  " .. truncateText(description, 200))
     end
-    local ts = repo.data and (repo.data.pushed_at or repo.data.created_at)
+    local ts = repo.pushed_at or repo.created_at
+    if ts == "" or ts == nil then
+        ts = repo.data and (repo.data.pushed_at or repo.data.created_at)
+    end
     if include_updated and ts and type(ts) == "string" then
         table.insert(lines, "  " .. string.format(_("Updated: %s"), ts:sub(1, 10)))
     end
@@ -8184,7 +8196,7 @@ function AppStore:getRepoDescriptors(kind)
     local descriptors = {}
     for _, repo in ipairs(entries) do
         local owner = repo.owner or (repo.data and repo.data.owner and repo.data.owner.login)
-        local descriptor = {
+        local descriptor = setmetatable({
             id = repo.repo_id,
             kind = kind,
             name = repo.name,
@@ -8194,8 +8206,18 @@ function AppStore:getRepoDescriptors(kind)
             language = repo.language,
             description = repo.description,
             homepage = repo.homepage,
-            data = repo.data,
-        }
+            pushed_at = repo.pushed_at,
+            created_at = repo.created_at,
+        }, {
+            -- Pass it through rather than copy it, or building the list would fetch
+            -- every response.
+            __index = function(_, key)
+                if key ~= "data" then
+                    return nil
+                end
+                return repo.data
+            end,
+        })
         table.insert(descriptors, descriptor)
     end
     self._repo_descriptors_cache = self._repo_descriptors_cache or {}

@@ -7,7 +7,7 @@ local logger = require("logger")
 
 local Cache = {}
 
-local DB_SCHEMA_VERSION = 20260426
+local DB_SCHEMA_VERSION = 20260807
 local DB_DIRECTORY = ffiUtil.joinPath(DataStorage:getDataDir(), "cache/appstore")
 local DB_PATH = ffiUtil.joinPath(DB_DIRECTORY, "appstore.sqlite3")
 
@@ -24,6 +24,9 @@ local SCHEMA_STATEMENTS = {
         language TEXT,
         homepage TEXT,
         fetched_at INTEGER NOT NULL,
+        -- Ordering reads these, so they stay out of `data`.
+        pushed_at TEXT,
+        created_at TEXT,
         data TEXT NOT NULL,
         UNIQUE(repo_id, kind)
     );]],
@@ -309,8 +312,8 @@ function Cache.storeRepos(kind, repos)
         delete_stmt:step()
         delete_stmt:close()
 
-        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
+        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
         local stmt = conn:prepare(insert_sql)
         for _, repo in ipairs(repos) do
             local owner_login = getOwnerLogin(repo.owner)
@@ -332,6 +335,8 @@ function Cache.storeRepos(kind, repos)
                 normalizeString(repo.language),
                 normalizeString(repo.homepage),
                 fetched_at,
+                normalizeString(repo.pushed_at),
+                normalizeString(repo.created_at),
                 encoded
             )
             stmt:step()
@@ -342,17 +347,49 @@ function Cache.storeRepos(kind, repos)
     end)
 end
 
-local function decodeRow(row)
-    local decoded
-    if row.data and row.data ~= "" then
-        local ok, parsed = pcall(json.decode, row.data)
-        if ok then
-            decoded = parsed
-        else
-            logger.warn("appstore cache decode error", parsed)
-        end
+local function decodeData(raw, context)
+    if not raw or raw == "" then
+        return nil
     end
-    return {
+    local ok, parsed = pcall(json.decode, raw)
+    if ok then
+        return parsed
+    end
+    logger.warn("appstore cache decode error", context, parsed)
+    return nil
+end
+
+-- The API response of one repo, fetched and decoded on first use: the listing selects
+-- everything but this column, and a page only ever shows a handful of entries.
+local function loadDataFor(repo_id, kind)
+    if not repo_id then
+        return nil
+    end
+    local raw = withConnection(function(conn)
+        local stmt = conn:prepare([[SELECT data FROM repos WHERE repo_id = ? AND kind = ?;]])
+        stmt:bind(repo_id, kind)
+        local row = stmt:step()
+        local value = row and row[1] or nil
+        stmt:close()
+        return value
+    end)
+    return decodeData(raw, repo_id)
+end
+
+local lazy_data_mt = {
+    __index = function(entry, key)
+        if key ~= "data" then
+            return nil
+        end
+        -- false rather than nil, so a repo with no stored data is not looked up again.
+        local loaded = loadDataFor(rawget(entry, "repo_id"), rawget(entry, "kind")) or false
+        rawset(entry, "data", loaded)
+        return loaded
+    end,
+}
+
+local function makeRow(row)
+    return setmetatable({
         repo_id = tonumber(row.repo_id),
         kind = row.kind,
         name = row.name,
@@ -363,13 +400,14 @@ local function decodeRow(row)
         language = row.language,
         homepage = row.homepage,
         fetched_at = tonumber(row.fetched_at) or 0,
-        data = decoded,
-    }
+        pushed_at = row.pushed_at,
+        created_at = row.created_at,
+    }, lazy_data_mt)
 end
 
 local function fetchRows(kind)
     return withConnection(function(conn)
-        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, data
+        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at
             FROM repos WHERE kind = ? ORDER BY stars DESC, name COLLATE NOCASE;]])
         stmt:bind(kind)
         local dataset = stmt:resultset("hi")
@@ -402,7 +440,7 @@ function Cache.listRepos(kind)
         for col_index, header in ipairs(headers) do
             row[header] = dataset[col_index][row_index]
         end
-        table.insert(result, decodeRow(row))
+        table.insert(result, makeRow(row))
     end
     return result
 end
