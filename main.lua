@@ -6274,29 +6274,43 @@ local function repoStarsValue(repo)
         or 0
 end
 
+-- Kept on the entry: sorting asks once per comparison, and parseGitHubTimestamp matches a
+-- pattern and builds a table for os.time -- thousands of times per rebuild otherwise.
 local function repoUpdatedValue(repo)
+    local cached = repo._pushed_ts
+    if cached ~= nil then
+        return cached
+    end
     -- For ordering, only consider pushed_at (last pushed commit).
     -- Repos with no pushes get value 0 and sink to the bottom.
-    -- Column first: this runs for every comparison of every sort.
+    -- Column first, so ordering doesn't need the API response.
     local pushed_at = repo.pushed_at
     if pushed_at == nil then
         pushed_at = repo.data and repo.data.pushed_at
     end
+    local value = 0
     if pushed_at and pushed_at ~= "" then
-        return parseGitHubTimestamp(pushed_at)
+        value = parseGitHubTimestamp(pushed_at)
     end
-    return 0
+    repo._pushed_ts = value
+    return value
 end
 
 local function repoCreatedValue(repo)
+    local cached = repo._created_ts
+    if cached ~= nil then
+        return cached
+    end
     local created_at = repo.created_at
     if created_at == nil then
         created_at = repo.data and repo.data.created_at
     end
+    local value = 0
     if created_at and created_at ~= "" then
-        return parseGitHubTimestamp(created_at)
+        value = parseGitHubTimestamp(created_at)
     end
-    return 0
+    repo._created_ts = value
+    return value
 end
 
 local function repoNameKey(repo)

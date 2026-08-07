@@ -31,6 +31,8 @@ local SCHEMA_STATEMENTS = {
         UNIQUE(repo_id, kind)
     );]],
     [[CREATE INDEX IF NOT EXISTS idx_repos_kind_stars ON repos(kind, stars DESC);]],
+    -- getLastFetched asks for the newest stamp of a kind; without this it scans them all.
+    [[CREATE INDEX IF NOT EXISTS idx_repos_kind_fetched ON repos(kind, fetched_at);]],
     [[CREATE TABLE IF NOT EXISTS patch_files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         repo_id INTEGER NOT NULL,
@@ -48,6 +50,10 @@ local SCHEMA_STATEMENTS = {
 }
 
 local initialized = false
+
+-- Asked on every render to validate other caches, and only ever changes when we write:
+-- opening the database to hear the same number again costs more than the number is worth.
+local last_fetched_cache = {}
 
 local function ensureDirectory()
     local ok, err = util.makePath(DB_DIRECTORY)
@@ -305,6 +311,7 @@ function Cache.storeRepos(kind, repos)
         return
     end
     local fetched_at = os.time()
+    last_fetched_cache[kind] = fetched_at
     withConnection(function(conn)
         conn:exec("BEGIN;")
         local delete_stmt = conn:prepare([[DELETE FROM repos WHERE kind = ?;]])
@@ -447,17 +454,24 @@ end
 
 function Cache.getLastFetched(kind)
     kind = kind or "plugin"
-    return withConnection(function(conn)
+    local cached = last_fetched_cache[kind]
+    if cached ~= nil then
+        return cached or nil
+    end
+    local value = withConnection(function(conn)
         local stmt = conn:prepare([[SELECT MAX(fetched_at) FROM repos WHERE kind = ?;]])
         stmt:bind(kind)
         local row = stmt:step()
-        local value = row and row[1] or nil
+        local result = row and row[1] or nil
         stmt:close()
-        return tonumber(value)
+        return tonumber(result)
     end)
+    last_fetched_cache[kind] = value or false
+    return value
 end
 
 function Cache.clear()
+    last_fetched_cache = {}
     withConnection(function(conn)
         conn:exec("DELETE FROM repos;")
     end)
