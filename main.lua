@@ -6856,8 +6856,12 @@ local function formatRepoEntry(repo, opts)
     if include_description and description ~= "" then
         table.insert(lines, "  " .. truncateText(description, 200))
     end
-    local ts = repo.pushed_at or repo.created_at
-    if ts == "" or ts == nil then
+    -- Columns hold "" when the field was absent, and "" is truthy here.
+    local ts = repo.pushed_at
+    if ts == nil or ts == "" then
+        ts = repo.created_at
+    end
+    if ts == nil or ts == "" then
         ts = repo.data and (repo.data.pushed_at or repo.data.created_at)
     end
     if include_updated and ts and type(ts) == "string" then
