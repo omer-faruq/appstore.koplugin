@@ -6941,7 +6941,18 @@ end
 -- we successfully downloaded the tree. Unchanged repos skip the git/trees
 -- API call entirely. Repos that dropped out of the search results are pruned
 -- so that stale rows never survive across refreshes.
+-- A full pass over every patch repository: downloads and writes run back to back with
+-- nobody waiting between them, so the database is opened once for the whole run.
 function AppStore:refreshPatchFileListings()
+    if Cache.withSession then
+        return Cache.withSession(function()
+            return self:refreshPatchFileListingsInSession()
+        end)
+    end
+    return self:refreshPatchFileListingsInSession()
+end
+
+function AppStore:refreshPatchFileListingsInSession()
     local patch_repos = self:getRepoDescriptors("patch")
 
     local valid_repo_ids = {}
@@ -6955,6 +6966,10 @@ function AppStore:refreshPatchFileListings()
         Cache.pruneOrphanPatchFiles(valid_repo_ids)
     end
 
+    -- One query for the whole list: both questions below are asked about every
+    -- repository, and asking them one at a time reopened the database twice per repo.
+    local summary = Cache.getPatchFileSummaryByRepo and Cache.getPatchFileSummaryByRepo() or nil
+
     local refreshed, skipped = 0, 0
     for _, repo in ipairs(patch_repos) do
         local repo_id = tonumber(repo.repo_id or repo.id)
@@ -6964,10 +6979,17 @@ function AppStore:refreshPatchFileListings()
             remote_pushed_at = nil
         end
 
-        local cached_pushed_at = repo_id and Cache.getPatchFilePushedAt
-            and Cache.getPatchFilePushedAt(repo_id) or nil
-        local cached_count = (repo_id and Cache.countPatchFiles)
-            and Cache.countPatchFiles(repo_id) or 0
+        local stored = summary and repo_id and summary[repo_id]
+        local cached_pushed_at, cached_count
+        if summary then
+            cached_pushed_at = stored and stored.pushed_at or nil
+            cached_count = stored and stored.count or 0
+        else
+            cached_pushed_at = repo_id and Cache.getPatchFilePushedAt
+                and Cache.getPatchFilePushedAt(repo_id) or nil
+            cached_count = (repo_id and Cache.countPatchFiles)
+                and Cache.countPatchFiles(repo_id) or 0
+        end
 
         -- A tree fetch is required when any of the following is true:
         --   * We have no recorded pushed_at for this repo (first run after the
@@ -7156,7 +7178,18 @@ function AppStore:makePatchMenuItem(repo, patch)
     }
 end
 
+-- Reading the whole list out of the database is one operation with nobody waiting
+-- between its queries, so it holds a single connection.
 function AppStore:buildBrowserEntries()
+    if Cache.withSession then
+        return Cache.withSession(function()
+            return self:buildBrowserEntriesInSession()
+        end)
+    end
+    return self:buildBrowserEntriesInSession()
+end
+
+function AppStore:buildBrowserEntriesInSession()
     self:ensureBrowserState()
     local kind = self.browser_state.kind or "plugin"
     local items = {}

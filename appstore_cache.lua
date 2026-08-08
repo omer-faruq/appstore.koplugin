@@ -73,8 +73,15 @@ local function openConnection()
     return conn
 end
 
+-- Held for the duration of Cache.withSession, so a long run of queries that nobody is
+-- waiting through -- a refresh, or building the whole list -- opens the database once.
+local session_conn = nil
+
 local function withConnection(fn)
     Cache.init()
+    if session_conn then
+        return fn(session_conn)
+    end
     local conn = openConnection()
     local ok, result = pcall(fn, conn)
     conn:close()
@@ -82,6 +89,23 @@ local function withConnection(fn)
         error(result)
     end
     return result
+end
+
+-- Wraps an operation with no human in the middle of it. Between such operations -- while
+-- the reader is looking at a page -- the database stays closed.
+function Cache.withSession(fn)
+    if session_conn then
+        return fn()
+    end
+    Cache.init()
+    session_conn = openConnection()
+    local results = table.pack(pcall(fn))
+    session_conn:close()
+    session_conn = nil
+    if not results[1] then
+        error(results[2])
+    end
+    return table.unpack(results, 2, results.n)
 end
 
 local function normalizeString(value)
@@ -170,6 +194,44 @@ function Cache.getPatchFilePushedAt(repo_id)
             return nil
         end
         return tostring(value)
+    end)
+end
+
+-- Row count and stored tree stamp for every repository at once, keyed by repo_id.
+-- The incremental refresh asks both questions about every patch repository, and asking
+-- one repository at a time reopened the database twice per repository.
+function Cache.getPatchFileSummaryByRepo()
+    return withConnection(function(conn)
+        local stmt = conn:prepare([[SELECT repo_id, COUNT(1) AS count,
+            MAX(CASE WHEN source_pushed_at IS NULL OR source_pushed_at = ''
+                THEN NULL ELSE source_pushed_at END) AS pushed_at
+            FROM patch_files GROUP BY repo_id;]])
+        local dataset = stmt:resultset("hi")
+        stmt:close()
+        local summary = {}
+        local headers = dataset and dataset[0]
+        local first_column = headers and dataset[1]
+        if type(first_column) ~= "table" then
+            return summary
+        end
+        for row_index = 1, #first_column do
+            local row = {}
+            for col_index, header in ipairs(headers) do
+                row[header] = dataset[col_index][row_index]
+            end
+            local repo_id = tonumber(row.repo_id)
+            if repo_id then
+                local pushed_at = row.pushed_at
+                if pushed_at == nil or pushed_at == "" then
+                    pushed_at = nil
+                end
+                summary[repo_id] = {
+                    count = tonumber(row.count) or 0,
+                    pushed_at = pushed_at and tostring(pushed_at) or nil,
+                }
+            end
+        end
+        return summary
     end)
 end
 
