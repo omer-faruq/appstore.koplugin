@@ -100,8 +100,11 @@ function Cache.withSession(fn)
     Cache.init()
     session_conn = openConnection()
     local results = table.pack(pcall(fn))
-    session_conn:close()
+    -- Cleared before closing: should close() throw, a stale handle here would send every
+    -- later query through a dead connection until KOReader restarts.
+    local conn = session_conn
     session_conn = nil
+    conn:close()
     if not results[1] then
         error(results[2])
     end
@@ -261,7 +264,10 @@ function Cache.listPatchFiles(repo_id)
     end
     return withConnection(function(conn)
         local stmt = conn:prepare([[SELECT path, filename, branch, sha, size, download_url
-            FROM patch_files WHERE repo_id = ? ORDER BY filename COLLATE NOCASE;]])
+            FROM patch_files WHERE repo_id = ?
+            -- NOCASE keeps Aa together; the second key settles which of the two comes
+            -- first, since NOCASE alone calls them equal and leaves the order to the plan.
+            ORDER BY filename COLLATE NOCASE, filename;]])
         stmt:bind(repo_id)
         local dataset = stmt:resultset("hi")
         stmt:close()
@@ -295,7 +301,7 @@ end
 function Cache.listPatchFilesByRepo()
     return withConnection(function(conn)
         local stmt = conn:prepare([[SELECT repo_id, path, filename, branch, sha, size, download_url
-            FROM patch_files ORDER BY repo_id, filename COLLATE NOCASE;]])
+            FROM patch_files ORDER BY repo_id, filename COLLATE NOCASE, filename;]])
         local dataset = stmt:resultset("hi")
         stmt:close()
         local grouped = {}
@@ -542,7 +548,7 @@ end
 local function fetchRows(kind)
     return withConnection(function(conn)
         local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, fork
-            FROM repos WHERE kind = ? ORDER BY stars DESC, name COLLATE NOCASE;]])
+            FROM repos WHERE kind = ? ORDER BY stars DESC, name COLLATE NOCASE, name;]])
         stmt:bind(kind)
         local dataset = stmt:resultset("hi")
         stmt:close()
