@@ -6849,6 +6849,23 @@ local function repoIsFork(repo)
     return repo ~= nil and repo.fork == true
 end
 
+-- The date shown as "Updated:". Columns first, so the two sources can't drift apart;
+-- the response is only worth opening when neither column was stored.
+local function repoUpdatedStamp(repo)
+    local ts = repo.pushed_at
+    if ts == nil or ts == "" then
+        ts = repo.created_at
+    end
+    if ts == nil or ts == "" then
+        local data = repo.data
+        ts = data and (data.pushed_at or data.updated_at or data.created_at)
+    end
+    if type(ts) ~= "string" or ts == "" then
+        return nil
+    end
+    return ts
+end
+
 local function formatRepoEntry(repo, opts)
     opts = opts or {}
     local include_description = opts.include_description ~= false
@@ -6866,15 +6883,8 @@ local function formatRepoEntry(repo, opts)
     if include_description and description ~= "" then
         table.insert(lines, "  " .. truncateText(description, 200))
     end
-    -- Columns hold "" when the field was absent, and "" is truthy here.
-    local ts = repo.pushed_at
-    if ts == nil or ts == "" then
-        ts = repo.created_at
-    end
-    if ts == nil or ts == "" then
-        ts = repo.data and (repo.data.pushed_at or repo.data.created_at)
-    end
-    if include_updated and ts and type(ts) == "string" then
+    local ts = repoUpdatedStamp(repo)
+    if include_updated and ts then
         table.insert(lines, "  " .. string.format(_("Updated: %s"), ts:sub(1, 10)))
     end
     return table.concat(lines, "\n")
@@ -6948,7 +6958,8 @@ function AppStore:refreshPatchFileListings()
     local refreshed, skipped = 0, 0
     for _, repo in ipairs(patch_repos) do
         local repo_id = tonumber(repo.repo_id or repo.id)
-        local remote_pushed_at = repo.data and repo.data.pushed_at
+        -- The column, not the blob: this runs for every patch repository.
+        local remote_pushed_at = repo.pushed_at
         if type(remote_pushed_at) ~= "string" or remote_pushed_at == "" then
             remote_pushed_at = nil
         end
@@ -8033,8 +8044,8 @@ function AppStore:showPatchRepoActionDialog(repo, entries)
     if description ~= "" then
         lines[#lines + 1] = description
     end
-    local ts = repo.data and (repo.data.pushed_at or repo.data.updated_at or repo.data.created_at)
-    if ts and ts ~= "" then
+    local ts = repoUpdatedStamp(repo)
+    if ts then
         if description ~= "" then
             lines[#lines + 1] = ""
         end
@@ -8674,8 +8685,8 @@ function AppStore:promptRepoAction(repo)
     if description ~= "" then
         lines[#lines + 1] = description
     end
-    local ts = repo.data and (repo.data.pushed_at or repo.data.updated_at or repo.data.created_at)
-    if ts and ts ~= "" then
+    local ts = repoUpdatedStamp(repo)
+    if ts then
         if description ~= "" then
             lines[#lines + 1] = ""
         end
