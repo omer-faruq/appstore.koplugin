@@ -2631,6 +2631,7 @@ function AppStore:startMatchFlow()
         buttons = {
             {
                 text = _("Cancel"),
+                id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                 callback = function()
                     UIManager:close(dialog)
                 end,
@@ -2729,6 +2730,7 @@ function AppStore:promptManualMatchForPlugin(plugin)
             {
                 {
                     text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                     background = Blitbuffer.COLOR_WHITE,
                     callback = function()
                         UIManager:close(dialog)
@@ -3273,6 +3275,7 @@ function AppStore:showPluginFileActionDialog(plugin, filepath, filename, filter_
                         {
                             {
                                 text = _("Cancel"),
+                                id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                                 callback = function()
                                     UIManager:close(copy_dialog)
                                 end,
@@ -3346,6 +3349,7 @@ function AppStore:showPluginFileActionDialog(plugin, filepath, filename, filter_
                         {
                             {
                                 text = _("Cancel"),
+                                id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                                 callback = function()
                                     UIManager:close(rename_dialog)
                                 end,
@@ -3853,6 +3857,7 @@ function AppStore:promptManualMatchForPatch(patch)
             {
                 {
                     text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                     background = Blitbuffer.COLOR_WHITE,
                     callback = function()
                         UIManager:close(dialog)
@@ -7517,6 +7522,7 @@ function AppStore:showFilterDialog()
             {
                 {
                     text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                     callback = function()
                         UIManager:close(dialog)
                     end,
@@ -7808,6 +7814,7 @@ function AppStore:promptInstallPluginFromURL()
             {
                 {
                     text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                     background = Blitbuffer.COLOR_WHITE,
                     callback = function()
                         UIManager:close(dialog)
@@ -7897,6 +7904,7 @@ function AppStore:promptInstallPatchFromURL()
             {
                 {
                     text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                     background = Blitbuffer.COLOR_WHITE,
                     callback = function()
                         UIManager:close(dialog)
@@ -8864,6 +8872,7 @@ function AppStore:promptSelection(descriptors, title)
         buttons = {
             {
                 text = _("Cancel"),
+                id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
                 callback = function()
                     UIManager:close(dialog)
                 end,
