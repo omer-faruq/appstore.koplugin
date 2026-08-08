@@ -1105,25 +1105,47 @@ local function getLatestModificationTimestamp(path)
     return latest
 end
 
+-- Reading one plugin costs a dofile of its _meta.lua and an lfs.attributes for every file
+-- below it. The updates dialog is rebuilt on every page flip, so that part is remembered per
+-- directory and only redone once the install store reports a change. The directory listing
+-- itself still runs every time, so a plugin copied in by hand shows up straight away.
 local function listInstalledPlugins()
     local plugins = {}
     local hidden_paths = AppStoreSettings:readSetting(PluginPaths.HIDDEN_PLUGIN_PATHS_KEY) or {}
+    local generation = InstallStore.getGeneration and InstallStore.getGeneration() or 0
+    local scanned = AppStore._installed_scan_cache
+    if not scanned or scanned.generation ~= generation then
+        scanned = { generation = generation, by_path = {} }
+        AppStore._installed_scan_cache = scanned
+    end
     for _, root in ipairs(PluginPaths.getLookupPaths()) do
         if lfs.attributes(root, "mode") == "directory" and not PluginPaths.isPathHidden(root, hidden_paths) then
             for entry in lfs.dir(root) do
                 if entry ~= "." and entry ~= ".." and entry:match("%.koplugin$") then
-                    local meta = loadPluginMeta(root, entry)
-                    local plugin = {
+                    local path = root .. "/" .. entry
+                    local scan = scanned.by_path[path]
+                    if not scan then
+                        local meta = loadPluginMeta(root, entry)
+                        scan = {
+                            meta = meta,
+                            name = getPluginDisplayName(meta, entry),
+                            version = meta and meta.version or nil,
+                            latest_mtime = getLatestModificationTimestamp(path),
+                        }
+                        scanned.by_path[path] = scan
+                    end
+                    -- A fresh table per call: callers fill in their own fields, and one of
+                    -- them writes latest_mtime back.
+                    table.insert(plugins, {
                         dirname = entry,
-                        meta = meta,
-                        name = getPluginDisplayName(meta, entry),
-                        version = meta and meta.version or nil,
+                        meta = scan.meta,
+                        name = scan.name,
+                        version = scan.version,
                         root = root,
-                        path = root .. "/" .. entry,
+                        path = path,
                         meta_path_hint = entry .. "/_meta.lua",
-                    }
-                    plugin.latest_mtime = getLatestModificationTimestamp(plugin.path)
-                    table.insert(plugins, plugin)
+                        latest_mtime = scan.latest_mtime,
+                    })
                 end
             end
         end
