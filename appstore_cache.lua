@@ -35,8 +35,6 @@ local SCHEMA_STATEMENTS = {
         UNIQUE(repo_id, kind)
     );]],
     [[CREATE INDEX IF NOT EXISTS idx_repos_kind_stars ON repos(kind, stars DESC);]],
-    -- getLastFetched asks for the newest stamp of a kind; without this it scans them all.
-    [[CREATE INDEX IF NOT EXISTS idx_repos_kind_fetched ON repos(kind, fetched_at);]],
     [[CREATE TABLE IF NOT EXISTS patch_files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         repo_id INTEGER NOT NULL,
@@ -372,7 +370,9 @@ function Cache.storeRepos(kind, repos)
         conn:exec("COMMIT;")
     end)
     -- Only once the rows are in: an empty refresh must keep reading as empty.
-    last_fetched_cache[kind] = #repos > 0 and fetched_at or nil
+    -- `false` rather than `nil`: nil means "not asked yet" and sends every render
+    -- back to the database.
+    last_fetched_cache[kind] = #repos > 0 and fetched_at or false
 end
 
 local function decodeData(raw, context)
@@ -409,8 +409,16 @@ local lazy_data_mt = {
         if key ~= "data" then
             return nil
         end
-        -- false rather than nil, so a repo with no stored data is not looked up again.
-        local loaded = loadDataFor(rawget(entry, "repo_id"), rawget(entry, "kind")) or false
+        -- A repo with no stored response must not be looked up again, but `data` still has
+        -- to read as nil: callers test it, and some of them will use `~= nil`.
+        if rawget(entry, "_no_data") then
+            return nil
+        end
+        local loaded = loadDataFor(rawget(entry, "repo_id"), rawget(entry, "kind"))
+        if loaded == nil then
+            rawset(entry, "_no_data", true)
+            return nil
+        end
         rawset(entry, "data", loaded)
         return loaded
     end,
@@ -482,7 +490,9 @@ function Cache.getLastFetched(kind)
         return cached or nil
     end
     local value = withConnection(function(conn)
-        local stmt = conn:prepare([[SELECT MAX(fetched_at) FROM repos WHERE kind = ?;]])
+        -- storeRepos stamps every row of a kind with the same time in one transaction,
+        -- so any row answers this; the kind index finds one without a scan.
+        local stmt = conn:prepare([[SELECT fetched_at FROM repos WHERE kind = ? LIMIT 1;]])
         stmt:bind(kind)
         local row = stmt:step()
         local result = row and row[1] or nil

@@ -8207,6 +8207,18 @@ function AppStore:getInstalledLookup()
     return lookup
 end
 
+-- Shared by every descriptor: the cached row is reached through `_row` rather than a
+-- closure, so building the list allocates one table per repo instead of three.
+AppStore._descriptor_mt = {
+    __index = function(descriptor, key)
+        if key ~= "data" then
+            return nil
+        end
+        local row = rawget(descriptor, "_row")
+        return row and row.data or nil
+    end,
+}
+
 function AppStore:getRepoDescriptors(kind)
     -- Cache the built descriptor list in memory: rebuilding it reads the whole
     -- repo cache from disk and allocates a table per repo (hundreds of them),
@@ -8235,16 +8247,10 @@ function AppStore:getRepoDescriptors(kind)
             created_at = repo.created_at,
             topics = repo.topics,
             fork = repo.fork,
-        }, {
-            -- Pass it through rather than copy it, or building the list would fetch
+            -- Not copied but reached on demand, or building the list would fetch
             -- every response.
-            __index = function(_, key)
-                if key ~= "data" then
-                    return nil
-                end
-                return repo.data
-            end,
-        })
+            _row = repo,
+        }, AppStore._descriptor_mt)
         table.insert(descriptors, descriptor)
     end
     self._repo_descriptors_cache = self._repo_descriptors_cache or {}
