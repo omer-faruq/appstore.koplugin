@@ -6989,38 +6989,41 @@ function AppStore:refreshPatchFileListings()
     logger.dbg("AppStore patch tree refresh: refreshed=", refreshed, "skipped=", skipped)
 end
 
+-- Rows arrive ordered by filename from SQLite, so the list is built in place.
+function AppStore:patchEntriesFromRows(rows)
+    local entries = {}
+    for _, row in ipairs(rows or {}) do
+        local filename = row.filename or (row.path and row.path:match("([^/]+)$"))
+        if filename then
+            entries[#entries + 1] = {
+                filename = filename,
+                path = row.path,
+                display_path = row.path,
+                download_url = row.download_url,
+                branch = row.branch or "HEAD",
+                sha = row.sha,
+                size = row.size,
+            }
+        end
+    end
+    return entries
+end
+
+function AppStore:patchCacheKey(repo)
+    return repo.repo_id or repo.id or repo.full_name or repo.name or "repo"
+end
+
 function AppStore:getPatchEntriesForRepo(repo)
     self.patch_cache = self.patch_cache or {}
     local repo_id = repo.repo_id or repo.id
-    local key = repo_id or repo.full_name or repo.name or "repo"
+    local key = self:patchCacheKey(repo)
     local cache = self.patch_cache[key]
     local now = os.time()
     if cache and cache.entries and cache.timestamp and (now - cache.timestamp) < PATCH_CACHE_TTL then
         return cache.entries
     end
 
-    local entries = {}
-    if repo_id then
-        local rows = Cache.listPatchFiles(repo_id)
-        for _, row in ipairs(rows) do
-            local filename = row.filename or (row.path and row.path:match("([^/]+)$"))
-            if filename then
-                table.insert(entries, {
-                    filename = filename,
-                    path = row.path,
-                    display_path = row.path,
-                    download_url = row.download_url,
-                    branch = row.branch or "HEAD",
-                    sha = row.sha,
-                    size = row.size,
-                })
-            end
-        end
-    end
-
-    table.sort(entries, function(a, b)
-        return (a.filename or "") < (b.filename or "")
-    end)
+    local entries = repo_id and self:patchEntriesFromRows(Cache.listPatchFiles(repo_id)) or {}
     self.patch_cache[key] = {
         entries = entries,
         timestamp = now,
@@ -7028,7 +7031,40 @@ function AppStore:getPatchEntriesForRepo(repo)
     return entries
 end
 
+-- Fills the per-repo cache with a single query. The browser aggregates across the whole
+-- list, so asking repository by repository opened the database (and ran its PRAGMAs)
+-- once per repository -- a couple of hundred times per page.
+function AppStore:preloadPatchEntries(repos)
+    if not Cache.listPatchFilesByRepo then
+        return
+    end
+    self.patch_cache = self.patch_cache or {}
+    local now = os.time()
+    local stale = false
+    for _, repo in ipairs(repos) do
+        local cache = self.patch_cache[self:patchCacheKey(repo)]
+        if not (cache and cache.entries and cache.timestamp
+                and (now - cache.timestamp) < PATCH_CACHE_TTL) then
+            stale = true
+            break
+        end
+    end
+    if not stale then
+        return
+    end
+
+    local grouped = Cache.listPatchFilesByRepo()
+    for _, repo in ipairs(repos) do
+        local repo_id = tonumber(repo.repo_id or repo.id)
+        self.patch_cache[self:patchCacheKey(repo)] = {
+            entries = self:patchEntriesFromRows(repo_id and grouped[repo_id] or {}),
+            timestamp = now,
+        }
+    end
+end
+
 function AppStore:collectPatchEntries(repos)
+    self:preloadPatchEntries(repos)
     local aggregated = {}
     local search = normalizedLower(self.browser_state.search_text)
     local search_active = search ~= ""

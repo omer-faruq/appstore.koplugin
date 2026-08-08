@@ -227,6 +227,40 @@ function Cache.listPatchFiles(repo_id)
     end)
 end
 
+-- Every patch file of every repository, grouped by repo_id. The browser needs them all
+-- at once -- it aggregates across the whole list -- and asking per repository meant
+-- opening the database (and its PRAGMAs) a couple of hundred times per page.
+function Cache.listPatchFilesByRepo()
+    return withConnection(function(conn)
+        local stmt = conn:prepare([[SELECT repo_id, path, filename, branch, sha, size, download_url
+            FROM patch_files ORDER BY repo_id, filename COLLATE NOCASE;]])
+        local dataset = stmt:resultset("hi")
+        stmt:close()
+        local grouped = {}
+        local headers = dataset and dataset[0]
+        local first_column = headers and dataset[1]
+        if type(first_column) ~= "table" then
+            return grouped
+        end
+        for row_index = 1, #first_column do
+            local row = {}
+            for col_index, header in ipairs(headers) do
+                row[header] = dataset[col_index][row_index]
+            end
+            local repo_id = tonumber(row.repo_id)
+            if repo_id then
+                local bucket = grouped[repo_id]
+                if not bucket then
+                    bucket = {}
+                    grouped[repo_id] = bucket
+                end
+                bucket[#bucket + 1] = row
+            end
+        end
+        return grouped
+    end)
+end
+
 -- Delete patch_files rows for any repo_id not present in `valid_repo_ids`.
 -- Used by the incremental refresh to drop data for patch repositories that
 -- were removed from the search results since the previous refresh (e.g. a
