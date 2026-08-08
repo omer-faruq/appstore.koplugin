@@ -664,10 +664,31 @@ local function buildPatchSummary(remote_info)
         else
             summary.unmatched = summary.unmatched + 1
         end
-        local local_sha = computeFileSha1(installed_patch.path)
         local remote_entry = remote_info and remote_info[installed_patch.filename]
         local remote_sha = (remote_entry and remote_entry.remote_sha)
             or (record and record.sha)
+        -- Hashing reads the whole file off the card, and this runs for every installed patch
+        -- on every rebuild of the dialog. The value is only needed for records that pre-date
+        -- SHA storage; anything else asks for it later, one patch at a time. Remembered per
+        -- file, keyed on what would change its contents.
+        local local_sha
+        if record and remote_sha and not record.sha then
+            local sha_cache = AppStore._patch_sha_cache
+            if not sha_cache then
+                sha_cache = {}
+                AppStore._patch_sha_cache = sha_cache
+            end
+            local sha_key = string.format("%s|%s|%s", installed_patch.path,
+                tostring(installed_patch.latest_mtime), tostring(installed_patch.size))
+            local_sha = sha_cache[sha_key]
+            if local_sha == nil then
+                local_sha = computeFileSha1(installed_patch.path) or false
+                sha_cache[sha_key] = local_sha
+            end
+            if local_sha == false then
+                local_sha = nil
+            end
+        end
         -- installed_sha: the SHA recorded at install/update time.
         -- Comparing remote_sha against this (not local_sha) means user edits to
         -- the local file do NOT trigger a false "update available" — only a real
@@ -2981,8 +3002,13 @@ function AppStore:promptPatchUpdateAction(patch_item)
     else
         table.insert(lines, _("Not matched with a repository."))
     end
-    if patch_item.local_sha then
-        table.insert(lines, string.format(_("Local SHA: %s"), patch_item.local_sha:sub(1, 8)))
+    -- One patch, on demand: the summary no longer hashes them all up front.
+    local local_sha = patch_item.local_sha
+    if not local_sha and patch_item.patch then
+        local_sha = computeFileSha1(patch_item.patch.path)
+    end
+    if local_sha then
+        table.insert(lines, string.format(_("Local SHA: %s"), local_sha:sub(1, 8)))
     end
     table.insert(lines, formatPatchRemoteStatus(remote_entry))
     if patch_item.needs_update then
