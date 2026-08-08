@@ -6843,12 +6843,10 @@ function AppStore:getCacheWarning(kind)
     return nil, false
 end
 
--- Returns true when the raw GitHub repo payload marks this entry as a fork.
--- The full API response is cached as `repo.data`, so no extra request is needed.
+-- Returns true when GitHub marks this entry as a fork. Asked once per rendered row,
+-- so it reads the column rather than the cached response.
 local function repoIsFork(repo)
-    if not repo then return false end
-    if repo.fork == true then return true end
-    return repo.data and repo.data.fork == true or false
+    return repo ~= nil and repo.fork == true
 end
 
 local function formatRepoEntry(repo, opts)
@@ -8225,6 +8223,7 @@ function AppStore:getRepoDescriptors(kind)
             pushed_at = repo.pushed_at,
             created_at = repo.created_at,
             topics = repo.topics,
+            fork = repo.fork,
         }, {
             -- Pass it through rather than copy it, or building the list would fetch
             -- every response.

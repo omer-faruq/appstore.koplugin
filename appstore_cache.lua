@@ -29,6 +29,8 @@ local SCHEMA_STATEMENTS = {
         created_at TEXT,
         -- Space-joined: search terms are split on whitespace, so no term can straddle two topics.
         topics TEXT,
+        -- Every rendered row asks whether it's a fork.
+        fork INTEGER NOT NULL DEFAULT 0,
         data TEXT NOT NULL,
         UNIQUE(repo_id, kind)
     );]],
@@ -334,8 +336,8 @@ function Cache.storeRepos(kind, repos)
         delete_stmt:step()
         delete_stmt:close()
 
-        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
+        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, fork, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
         local stmt = conn:prepare(insert_sql)
         for _, repo in ipairs(repos) do
             local owner_login = getOwnerLogin(repo.owner)
@@ -360,6 +362,7 @@ function Cache.storeRepos(kind, repos)
                 normalizeString(repo.pushed_at),
                 normalizeString(repo.created_at),
                 joinTopics(repo.topics),
+                repo.fork == true and 1 or 0,
                 encoded
             )
             stmt:step()
@@ -428,12 +431,13 @@ local function makeRow(row)
         pushed_at = row.pushed_at,
         created_at = row.created_at,
         topics = row.topics,
+        fork = tonumber(row.fork) == 1,
     }, lazy_data_mt)
 end
 
 local function fetchRows(kind)
     return withConnection(function(conn)
-        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics
+        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, fork
             FROM repos WHERE kind = ? ORDER BY stars DESC, name COLLATE NOCASE;]])
         stmt:bind(kind)
         local dataset = stmt:resultset("hi")
