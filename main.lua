@@ -4323,9 +4323,6 @@ function AppStoreListItem:init()
         radius = is_control and Size.radius.button or nil,
         row_widget,
     }
-    -- Only where the cursor walks the list: a bar is a fraction of the pixels an inverted
-    -- row costs, and FocusManager can repaint just that strip.
-    self._focus_bar = not Device:isTouchDevice()
     self[1] = self.frame
     self.dimen = self.frame:getSize()
 
@@ -4523,48 +4520,7 @@ function AppStoreListItem:isFocusable()
     return self.entry.callback ~= nil or self.entry.hold_callback ~= nil
 end
 
--- Screen coordinates, so only once painted: before that self.dimen has a size but no
--- position.
-function AppStoreListItem:getFocusIndicatorRegion()
-    if not (self._focus_bar and self._painted and self.dimen) then
-        return
-    end
-    local border = (self.frame and self.frame.bordersize) or 0
-    -- Stop where the corner arcs start, or erasing the bar bites into them.
-    local inset = border + ((self.frame and self.frame.radius) or 0)
-    local h = math.min(Size.line.focus_indicator or Size.line.thick, math.max(self.dimen.h - 2 * border, 1))
-    return Geom:new{
-        x = self.dimen.x + inset,
-        y = self.dimen.y + self.dimen.h - border - h,
-        w = math.max(self.dimen.w - 2 * inset, 1),
-        h = h,
-    }
-end
-
-function AppStoreListItem:repaintFocusIndicator(bb)
-    local region = self:getFocusIndicatorRegion()
-    if not region then
-        return false
-    end
-    bb:paintRect(region.x, region.y, region.w, region.h,
-        self._focused and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE)
-    return true
-end
-
-function AppStoreListItem:paintTo(bb, x, y)
-    InputContainer.paintTo(self, bb, x, y)
-    self._painted = true
-    if self._focus_bar and self._focused then
-        self:repaintFocusIndicator(bb)
-    end
-end
-
 function AppStoreListItem:onFocus()
-    if self._focus_bar then
-        self._focused = true
-        -- No setDirty: a region-less one would swallow FocusManager's narrow repaint.
-        return true
-    end
     if not self.frame then
         return true
     end
@@ -4574,10 +4530,6 @@ function AppStoreListItem:onFocus()
 end
 
 function AppStoreListItem:onUnfocus()
-    if self._focus_bar then
-        self._focused = false
-        return true
-    end
     if not self.frame then
         return true
     end
