@@ -7,7 +7,7 @@ local logger = require("logger")
 
 local Cache = {}
 
-local DB_SCHEMA_VERSION = 20260807
+local DB_SCHEMA_VERSION = 20260808
 local DB_DIRECTORY = ffiUtil.joinPath(DataStorage:getDataDir(), "cache/appstore")
 local DB_PATH = ffiUtil.joinPath(DB_DIRECTORY, "appstore.sqlite3")
 
@@ -24,9 +24,11 @@ local SCHEMA_STATEMENTS = {
         language TEXT,
         homepage TEXT,
         fetched_at INTEGER NOT NULL,
-        -- Ordering reads these, so they stay out of `data`.
+        -- Ordering and search read these, so they stay out of `data`.
         pushed_at TEXT,
         created_at TEXT,
+        -- Space-joined: search terms are split on whitespace, so no term can straddle two topics.
+        topics TEXT,
         data TEXT NOT NULL,
         UNIQUE(repo_id, kind)
     );]],
@@ -87,6 +89,20 @@ local function normalizeString(value)
         return ""
     end
     return tostring(value)
+end
+
+local function joinTopics(value)
+    if type(value) ~= "table" then
+        return ""
+    end
+    local parts = {}
+    for _, topic in ipairs(value) do
+        local text = normalizeString(topic)
+        if text ~= "" then
+            parts[#parts + 1] = text
+        end
+    end
+    return table.concat(parts, " ")
 end
 
 local function normalizeNumber(value)
@@ -318,8 +334,8 @@ function Cache.storeRepos(kind, repos)
         delete_stmt:step()
         delete_stmt:close()
 
-        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
+        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
         local stmt = conn:prepare(insert_sql)
         for _, repo in ipairs(repos) do
             local owner_login = getOwnerLogin(repo.owner)
@@ -343,6 +359,7 @@ function Cache.storeRepos(kind, repos)
                 fetched_at,
                 normalizeString(repo.pushed_at),
                 normalizeString(repo.created_at),
+                joinTopics(repo.topics),
                 encoded
             )
             stmt:step()
@@ -410,12 +427,13 @@ local function makeRow(row)
         fetched_at = tonumber(row.fetched_at) or 0,
         pushed_at = row.pushed_at,
         created_at = row.created_at,
+        topics = row.topics,
     }, lazy_data_mt)
 end
 
 local function fetchRows(kind)
     return withConnection(function(conn)
-        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at
+        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics
             FROM repos WHERE kind = ? ORDER BY stars DESC, name COLLATE NOCASE;]])
         stmt:bind(kind)
         local dataset = stmt:resultset("hi")

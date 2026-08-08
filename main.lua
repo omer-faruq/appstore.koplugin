@@ -6181,11 +6181,9 @@ function AppStore:repoMatchesSearch(repo, search)
     addField(repo.name)
     addField(repo.description)
     addField(repo.language)
-    if repo.data and type(repo.data.topics) == "table" then
-        for _, topic in ipairs(repo.data.topics) do
-            addField(topic)
-        end
-    end
+    -- From the column, not `data`: reaching into the blob here would decode every cached
+    -- repository on the first search.
+    addField(repo.topics)
     if #haystacks == 0 then
         return false
     end
@@ -8226,6 +8224,7 @@ function AppStore:getRepoDescriptors(kind)
             homepage = repo.homepage,
             pushed_at = repo.pushed_at,
             created_at = repo.created_at,
+            topics = repo.topics,
         }, {
             -- Pass it through rather than copy it, or building the list would fetch
             -- every response.
