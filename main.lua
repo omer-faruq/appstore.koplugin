@@ -6855,6 +6855,10 @@ function AppStore:browserListCacheKey(kind)
         tostring(state.sort_mode or ""),
         -- Identity, not contents: the table is rebuilt whenever the remote search reruns.
         tostring(self.readme_filter),
+        -- Filtering the patch tab reads patch rows too, through repoHasMatchingPatch, so
+        -- both lists that depend on them count the same generation. Safe today only
+        -- because the one writer clears both caches -- an asymmetry outlives its reason.
+        tostring(self._patch_cache_generation or 0),
     }, "\0")
 end
 
@@ -6863,7 +6867,11 @@ function AppStore:getFilteredDescriptors(kind)
     -- Rebuilt for every page turn, though only the visible slice changes. Filtering and
     -- sorting the whole list again cost 40-150 ms a page on a Kindle 3.
     local cache_key = self:browserListCacheKey(kind)
-    local cached = self._filtered_cache
+    -- A slot per kind. With a single slot, every tab switch threw the other list away and
+    -- refiltered from scratch -- and since switching resets the filters, each tab's key
+    -- settles down, so the slot hits on the way back.
+    self._filtered_cache = self._filtered_cache or {}
+    local cached = self._filtered_cache[kind]
     if cached and cached.key == cache_key then
         return cached.filtered, cached.total
     end
@@ -6932,7 +6940,7 @@ function AppStore:getFilteredDescriptors(kind)
         end
     end
     self:sortRepoList(filtered)
-    self._filtered_cache = { key = cache_key, filtered = filtered, total = #descriptors }
+    self._filtered_cache[kind] = { key = cache_key, filtered = filtered, total = #descriptors }
     return filtered, #descriptors
 end
 
@@ -7221,8 +7229,8 @@ end
 function AppStore:collectPatchEntries(repos)
     self:preloadPatchEntries(repos)
     -- Same reasoning as the filtered list: a page turn does not change the aggregate. The
-    -- patch cache generation joins the key because these rows are built from it.
-    local cache_key = self:browserListCacheKey("patch") .. "\0" .. tostring(self._patch_cache_generation or 0)
+    -- shared key already counts the patch cache generation these rows are built from.
+    local cache_key = self:browserListCacheKey("patch")
     local cached = self._patch_entries_cache
     if cached and cached.key == cache_key then
         return cached.entries
