@@ -6359,12 +6359,33 @@ local function repoCreatedValue(repo)
     return value
 end
 
+-- A sort asks for the same key once per comparison, which is thousands of times over a
+-- full list; trimming and lowercasing is not free, so keep it on the row, as with the
+-- parsed timestamps.
 local function repoNameKey(repo)
-    return normalizedLower(repo.name or repo.full_name or "")
+    local cached = repo._name_key
+    if cached ~= nil then
+        return cached
+    end
+    local value = normalizedLower(repo.name or repo.full_name or "")
+    repo._name_key = value
+    return value
 end
 
+-- Kept on the patch rather than on the aggregate row: the rows are rebuilt for every page
+-- turn, the patches behind them live in the per-repository cache.
 local function patchNameKey(entry)
-    return normalizedLower(entry.patch and entry.patch.filename or "")
+    local patch = entry.patch
+    if not patch then
+        return ""
+    end
+    local cached = patch._name_key
+    if cached ~= nil then
+        return cached
+    end
+    local value = normalizedLower(patch.filename or "")
+    patch._name_key = value
+    return value
 end
 
 local function compareRepoStarsDesc(a, b)
