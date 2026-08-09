@@ -6618,10 +6618,46 @@ function AppStore:saveBrowserState()
     }
     self.browser_state.scroll_offset = state.scroll_offset
     local ok, encoded = pcall(json.encode, state)
-    if ok then
-        AppStoreSettings:saveSetting(BROWSER_STATE_KEY, encoded)
-        AppStoreSettings:flush()
+    if not ok then
+        return
     end
+    -- Page turns save twice -- once for the new page, once for the outgoing dialog's
+    -- scroll position -- and often with nothing new to say.
+    if encoded == self._browser_state_written then
+        return
+    end
+    self._browser_state_written = encoded
+    AppStoreSettings:saveSetting(BROWSER_STATE_KEY, encoded)
+    -- In memory now, on disk shortly. Flushing here is a synchronous write to slow
+    -- storage: 9-21 ms measured on a Kindle 3, against ~30 ms for the whole page. The
+    -- deferred write is coalesced, and forced when KOReader flushes its own settings.
+    self._browser_state_unwritten = true
+    if self._browser_state_flush_task then
+        UIManager:unschedule(self._browser_state_flush_task)
+    end
+    self._browser_state_flush_task = function()
+        self._browser_state_flush_task = nil
+        self:flushBrowserState()
+    end
+    UIManager:scheduleIn(5, self._browser_state_flush_task)
+end
+
+function AppStore:flushBrowserState()
+    if not self._browser_state_unwritten then
+        return
+    end
+    self._browser_state_unwritten = false
+    AppStoreSettings:flush()
+end
+
+-- Broadcast before suspend and on the way out, which is exactly when a deferred write has
+-- to land.
+function AppStore:onFlushSettings()
+    if self._browser_state_flush_task then
+        UIManager:unschedule(self._browser_state_flush_task)
+        self._browser_state_flush_task = nil
+    end
+    self:flushBrowserState()
 end
 
 function AppStore:ensureBrowserState()
