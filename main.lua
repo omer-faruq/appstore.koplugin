@@ -6803,8 +6803,34 @@ function AppStore:descriptorMatches(repo, filters)
     return true
 end
 
+-- Everything a filtered, sorted list depends on, in one string. Page number is absent on
+-- purpose: turning a page changes which slice is shown, not what the list holds.
+function AppStore:browserListCacheKey(kind)
+    self:ensureBrowserState()
+    local state = self.browser_state
+    return table.concat({
+        tostring(kind),
+        -- Same stamp the descriptor cache watches: a refresh moves it and drops both.
+        tostring(Cache.getLastFetched and Cache.getLastFetched(kind)),
+        tostring(state.search_text or ""),
+        tostring(state.search_in_readme),
+        tostring(state.owner or ""),
+        tostring(state.min_stars or 0),
+        tostring(state.sort_mode or ""),
+        -- Identity, not contents: the table is rebuilt whenever the remote search reruns.
+        tostring(self.readme_filter),
+    }, "\0")
+end
+
 function AppStore:getFilteredDescriptors(kind)
     self:ensureBrowserState()
+    -- Rebuilt for every page turn, though only the visible slice changes. Filtering and
+    -- sorting the whole list again cost 40-150 ms a page on a Kindle 3.
+    local cache_key = self:browserListCacheKey(kind)
+    local cached = self._filtered_cache
+    if cached and cached.key == cache_key then
+        return cached.filtered, cached.total
+    end
     local descriptors = self:getRepoDescriptors(kind)
     local filtered = {}
     local search = normalizedLower(self.browser_state.search_text)
@@ -6870,6 +6896,7 @@ function AppStore:getFilteredDescriptors(kind)
         end
     end
     self:sortRepoList(filtered)
+    self._filtered_cache = { key = cache_key, filtered = filtered, total = #descriptors }
     return filtered, #descriptors
 end
 
@@ -7145,6 +7172,7 @@ function AppStore:preloadPatchEntries(repos)
     end
 
     local grouped = Cache.listPatchFilesByRepo()
+    self._patch_cache_generation = (self._patch_cache_generation or 0) + 1
     for _, repo in ipairs(repos) do
         local repo_id = tonumber(repo.repo_id or repo.id)
         self.patch_cache[self:patchCacheKey(repo)] = {
@@ -7156,6 +7184,13 @@ end
 
 function AppStore:collectPatchEntries(repos)
     self:preloadPatchEntries(repos)
+    -- Same reasoning as the filtered list: a page turn does not change the aggregate. The
+    -- patch cache generation joins the key because these rows are built from it.
+    local cache_key = self:browserListCacheKey("patch") .. "\0" .. tostring(self._patch_cache_generation or 0)
+    local cached = self._patch_entries_cache
+    if cached and cached.key == cache_key then
+        return cached.entries
+    end
     local aggregated = {}
     local search = normalizedLower(self.browser_state.search_text)
     local search_active = search ~= ""
@@ -7195,7 +7230,9 @@ function AppStore:collectPatchEntries(repos)
             end
         end
     end
-    return self:sortPatchEntries(aggregated)
+    local sorted = self:sortPatchEntries(aggregated)
+    self._patch_entries_cache = { key = cache_key, entries = sorted }
+    return sorted
 end
 
 function AppStore:makeRepoMenuItem(repo, installed_lookup)
@@ -9430,6 +9467,10 @@ function AppStore:refreshCache(kind)
     self.is_refreshing = true
     self.patch_cache = {}
     self._repo_descriptors_cache = nil
+    -- The stamp in their key would drop them anyway; cleared here so nothing holds a list
+    -- built from rows this refresh is about to replace.
+    self._filtered_cache = nil
+    self._patch_entries_cache = nil
     local progress = InfoMessage:new{ text = _("Refreshing AppStore cache..."), timeout = 0 }
     UIManager:show(progress)
 
