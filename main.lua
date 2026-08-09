@@ -1155,11 +1155,16 @@ local function listInstalledPlugins()
                         }
                         scanned.by_path[path] = scan
                     end
-                    -- A fresh table per call: callers fill in their own fields, and one of
-                    -- them writes latest_mtime back.
+                    -- A fresh table per call: callers fill in their own fields. One of them
+                    -- computes latest_mtime when the scan came back without it, and writes
+                    -- it into the scan as well so the next rebuild inherits it.
+                    --
+                    -- The parsed _meta.lua itself is not handed out. Nothing reads it --
+                    -- name and version are taken from it once, here -- and sharing one
+                    -- parsed table across calls that used to get their own would have bitten
+                    -- quietly the day something wrote to it.
                     table.insert(plugins, {
                         dirname = entry,
-                        meta = scan.meta,
                         name = scan.name,
                         version = scan.version,
                         root = root,
@@ -1291,6 +1296,15 @@ function AppStore:collectUpdateSummary()
         if not local_latest_ts or local_latest_ts == 0 then
             local_latest_ts = getLatestModificationTimestamp(plugin.path)
             plugin.latest_mtime = local_latest_ts
+            -- Back into the scan too, not just this call's copy. The row is rebuilt every
+            -- time the list is; without this, plugins whose scan came back with nothing
+            -- walk their whole directory again on each rebuild -- the very cost the scan
+            -- cache was added to remove.
+            local scanned = AppStore._installed_scan_cache
+            local scan = scanned and scanned.by_path and scanned.by_path[plugin.path]
+            if scan then
+                scan.latest_mtime = local_latest_ts
+            end
         end
         
         local has_update = false
@@ -6659,6 +6673,11 @@ function AppStore:onFlushSettings()
     end
     self:flushBrowserState()
 end
+
+-- Same on the way out of the plugin. Harmless to leave a write scheduled -- the settings
+-- object outlives us -- but a task pointing at a closed plugin is the kind of thing that
+-- stops being harmless quietly.
+AppStore.onCloseWidget = AppStore.onFlushSettings
 
 function AppStore:ensureBrowserState()
     if not self.browser_state then
