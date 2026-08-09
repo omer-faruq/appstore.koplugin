@@ -7317,6 +7317,14 @@ function AppStore:buildBrowserEntriesInSession()
     })
     items[#items].separator = true
 
+    -- Before filtering, not after. Searching the patch tab asks every repository whether
+    -- one of its patches matches, and on a cold cache each of those questions was its own
+    -- query; the aggregation below would then load the lot in one go anyway. Measured on a
+    -- Kindle 3 over 208 repositories: 698-756 ms against 123 ms once the cache is warm.
+    if kind == "patch" then
+        self:preloadPatchEntries(self:getRepoDescriptors(kind))
+    end
+
     local filtered, total = self:getFilteredDescriptors(kind)
     table.insert(items, {
         text = self:getCacheStatusLine(kind, total),
