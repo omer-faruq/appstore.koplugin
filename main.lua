@@ -7112,6 +7112,14 @@ function AppStore:storePatchEntriesForRepo(repo, source_pushed_at)
         return false
     end
     local entries = self:fetchPatchEntriesFromGitHub(repo)
+    -- After each request, as the search does. Progress reporting is the only other reader
+    -- of the input queue and it is throttled to 1.5 s, so a stage that finishes between two
+    -- redraws never read it at all -- and the key that asked it to stop went to whatever
+    -- opened next. An incremental refresh of a few repositories is exactly that short.
+    local progress = AppStore._refresh_progress
+    if progress then
+        progress:pump()
+    end
     -- storePatchFiles clears the repository's rows before inserting, so writing the nothing
     -- a failed request returned would delete the patches on record.
     if not entries then
@@ -7156,7 +7164,18 @@ function AppStore:refreshPatchFileListingsInSession()
     -- repository, and asking them one at a time reopened the database twice per repo.
     local summary = Cache.getPatchFileSummaryByRepo and Cache.getPatchFileSummaryByRepo() or nil
 
-    local refreshed, skipped, failed = 0, 0, 0
+    -- Decided up front for the whole list, because the progress bar has to count the
+    -- repositories that will actually be fetched. Stepping it per repository looked like a
+    -- jump: the untouched ones are skipped in no time, and between two redraws the bar
+    -- would cross a third of its length at once.
+    --
+    -- A tree fetch is required when any of the following is true:
+    --   * We have no recorded pushed_at for this repo (first run after the
+    --     schema bump, a prior failure, or a brand-new repo).
+    --   * The remote pushed_at differs from the cached value.
+    --   * Cache has zero rows AND the remote repo has commits: a previous
+    --     attempt likely failed, so retry even if timestamps match.
+    local pending = {}
     for _, repo in ipairs(patch_repos) do
         local repo_id = tonumber(repo.repo_id or repo.id)
         -- The column, not the blob: this runs for every patch repository.
@@ -7177,28 +7196,39 @@ function AppStore:refreshPatchFileListingsInSession()
                 and Cache.countPatchFiles(repo_id) or 0
         end
 
-        -- A tree fetch is required when any of the following is true:
-        --   * We have no recorded pushed_at for this repo (first run after the
-        --     schema bump, a prior failure, or a brand-new repo).
-        --   * The remote pushed_at differs from the cached value.
-        --   * Cache has zero rows AND the remote repo has commits: a previous
-        --     attempt likely failed, so retry even if timestamps match.
-        local must_refetch = (not cached_pushed_at)
-            or (remote_pushed_at and cached_pushed_at ~= remote_pushed_at)
-            or (cached_count == 0)
-
-        if must_refetch then
-            if self:storePatchEntriesForRepo(repo, remote_pushed_at) then
-                refreshed = refreshed + 1
-            else
-                failed = failed + 1
-            end
-        else
-            skipped = skipped + 1
+        if (not cached_pushed_at)
+                or (remote_pushed_at and cached_pushed_at ~= remote_pushed_at)
+                or (cached_count == 0) then
+            pending[#pending + 1] = { repo = repo, pushed_at = remote_pushed_at }
         end
     end
+
+    local total = #pending
+    local refreshed = 0
+    local failed = 0
+    if total == 0 then
+        self:reportRefreshProgress(1)
+    end
+    for index, item in ipairs(pending) do
+        if self:refreshCancelled() then
+            logger.dbg("AppStore patch tree refresh: stopped by the user after", index - 1, "of", total)
+            break
+        end
+        if self:storePatchEntriesForRepo(item.repo, item.pushed_at) then
+            refreshed = refreshed + 1
+            -- A stop between two repositories leaves the ones already done in place, and
+            -- the message at the end has to know that.
+            AppStore._refresh_wrote_anything = true
+        else
+            failed = failed + 1
+        end
+        -- After the fetch: reporting first left the bar a repository behind, and it never
+        -- reached the end of the stage.
+        self:reportRefreshProgress(index / total)
+    end
     logger.dbg("AppStore patch tree refresh: refreshed=", refreshed,
-        "failed=", failed, "skipped=", skipped)
+        "failed=", failed,
+        "skipped=", #patch_repos - #pending)
 end
 
 -- Rows arrive ordered by filename from SQLite, so the list is built in place.
@@ -7604,20 +7634,20 @@ function AppStore:browserRefresh()
     self:closeBrowserMenu()
     NetworkMgr:runWhenOnline(function()
         UIManager:nextTick(function()
-            local start_notice = InfoMessage:new{
-                text = _("Caching started, please wait…"),
-                timeout = 5,
-            }
-            UIManager:show(start_notice)
-            UIManager:nextTick(function()
+            -- No "caching started" notice: refreshCache puts up a progress dialog straight
+            -- away, and the two of them on screen at once only looked like a glitch.
+            --
+            -- Wrapped in a coroutine, and everything that follows the refresh has to live
+            -- inside it: the refresh yields to let UIManager read the input queue (that is
+            -- what makes the dialog's Back key work), and a yield returns from this call.
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
                 self:refreshCache(kind)
+                self:showBrowser(kind)
                 UIManager:nextTick(function()
-                    self:showBrowser(kind)
-                    UIManager:nextTick(function()
-                        if self.browser_menu then
-                            UIManager:setDirty(self.browser_menu)
-                        end
-                    end)
+                    if self.browser_menu then
+                        UIManager:setDirty(self.browser_menu)
+                    end
                 end)
             end)
         end)
@@ -9347,7 +9377,19 @@ end
 -- `response_table, err_info`. On rate-limit it raises a user-facing error
 -- (caught by the caller in pcall) so the refresh can surface the limit
 -- message without silently dropping data.
+-- True for the error a stopped refresh hands back, so the callers can stay quiet about it.
+-- A field rather than a local: main.lua is at LuaJIT's limit of 200 locals per chunk.
+function AppStore.searchWasCancelled(err)
+    return type(err) == "table" and err.cancelled == true
+end
+
 local function performSearchPage(query, page, per_page)
+    -- Checked here rather than in the loops: every branch, bisection and page goes through
+    -- this call, so one test unwinds all of them at once. Without it, stopping mid-search
+    -- still worked through the remaining topic and name branches, one request each.
+    if AppStore._refresh_cancelled then
+        return nil, { code = "cancelled", cancelled = true }
+    end
     local response, err = GitHub.searchRepositories({
         q = query,
         per_page = per_page,
@@ -9355,6 +9397,14 @@ local function performSearchPage(query, page, per_page)
         order = "desc",
         page = page,
     })
+    -- After the request, whatever it returned. Progress reporting pumps the input queue,
+    -- but it only runs when a repository is appended: a run of empty pages -- a fork
+    -- branch with no hits, a name query that matches nothing -- would leave Back unread
+    -- for as long as those requests take.
+    local progress = AppStore._refresh_progress
+    if progress then
+        progress:pump()
+    end
     if not response then
         if type(err) == "table" and err.is_fine_grained_unsupported then
             error(_("GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."))
@@ -9364,7 +9414,9 @@ local function performSearchPage(query, page, per_page)
         end
         -- Recorded in the one call every branch, bisection and page goes through: a failed
         -- branch is only logged, so what the search collected is partial, not smaller.
-        AppStore._refresh_search_incomplete = true
+        if not AppStore.searchWasCancelled(err) then
+            AppStore._refresh_search_incomplete = true
+        end
     end
     return response, err
 end
@@ -9386,6 +9438,11 @@ local function paginateFromPage(query, append, start_page)
         end
         for _, repo in ipairs(items) do
             append(repo)
+        end
+        -- The progress dialog can be dismissed; stop at the page boundary rather than
+        -- fetching the rest of them for a refresh nobody is waiting for.
+        if AppStore._refresh_cancelled then
+            return nil
         end
         if #items < per_page then
             return nil
@@ -9413,7 +9470,9 @@ local function exhaustiveSearch(base_query, append, date_from, date_to, depth)
 
     local first_response, first_err = performSearchPage(query, 1, 100)
     if not first_response then
-        logger.warn("AppStore search first-page error", query, first_err and first_err.body or first_err)
+        if not AppStore.searchWasCancelled(first_err) then
+            logger.warn("AppStore search first-page error", query, first_err and first_err.body or first_err)
+        end
         return
     end
 
@@ -9434,7 +9493,9 @@ local function exhaustiveSearch(base_query, append, date_from, date_to, depth)
         if #first_items >= 100 then
             local err = paginateFromPage(query, append, 2)
             if err then
-                logger.warn("AppStore pagination error", query, err)
+                if not AppStore.searchWasCancelled(err) then
+                    logger.warn("AppStore pagination error", query, err)
+                end
             end
         end
         return
@@ -9452,7 +9513,9 @@ local function exhaustiveSearch(base_query, append, date_from, date_to, depth)
         if #first_items >= 100 then
             local err = paginateFromPage(query, append, 2)
             if err then
-                logger.warn("AppStore pagination error (tiny range)", query, err)
+                if not AppStore.searchWasCancelled(err) then
+                    logger.warn("AppStore pagination error (tiny range)", query, err)
+                end
             end
         end
         return
@@ -9477,7 +9540,9 @@ local function exhaustiveSearchAdaptive(base_topic_query, branch_suffix, append,
 
     local first_response, first_err = performSearchPage(query, 1, 100)
     if not first_response then
-        logger.warn("AppStore adaptive search first-page error", query, first_err and first_err.body or first_err)
+        if not AppStore.searchWasCancelled(first_err) then
+            logger.warn("AppStore adaptive search first-page error", query, first_err and first_err.body or first_err)
+        end
         return
     end
 
@@ -9492,7 +9557,9 @@ local function exhaustiveSearchAdaptive(base_topic_query, branch_suffix, append,
         if #first_items >= 100 then
             local err = paginateFromPage(query, append, 2)
             if err then
-                logger.warn("AppStore adaptive pagination error", query, err)
+                if not AppStore.searchWasCancelled(err) then
+                    logger.warn("AppStore adaptive pagination error", query, err)
+                end
             end
         end
         return
@@ -9512,8 +9579,19 @@ end
 function AppStore:fetchAndStore(kind, topics, label, name_queries)
     local collected = {}
     local seen = {}
+    -- The search runs until GitHub stops handing out pages, so the total is not known in
+    -- advance. What the last refresh found is a good enough yardstick: the ecosystem grows
+    -- by a handful of repositories between refreshes, not by a factor.
+    local expected = self:getRefreshExpectedCount(kind)
+    -- Split the slice handed to us: searching first, writing at the end. Done here rather
+    -- than by the caller, so the search cannot fill the whole slice and then jump back
+    -- when the write claims its own share.
+    local outer_base = AppStore._refresh_phase_base or 0
+    local outer_span = AppStore._refresh_phase_span or 1
+    self:beginRefreshPhase(outer_base, outer_span * (1 - AppStore.STORE_SHARE))
     local function append(repo)
         appendUniqueRepo(collected, seen, repo)
+        self:reportRefreshProgress(#collected / expected)
     end
 
     -- Topic-based query: run the adaptive non-fork + fork pair. Each branch
@@ -9549,6 +9627,12 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries)
         end
     end
 
+    -- A stopped search has whatever it had; writing it would replace a complete cache with a
+    -- partial one. Zero, not #collected: the count means rows stored.
+    if self:refreshCancelled() then
+        return 0
+    end
+
     -- Losing Wi-Fi halfway through a minute-long search would otherwise replace 1479 cached
     -- repositories with the 300 that arrived before it went.
     if AppStore._refresh_search_incomplete then
@@ -9556,11 +9640,64 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries)
         return 0
     end
 
+    -- Its own stage, and a long one -- every repository is encoded to JSON on the way in.
+    -- Without a heading the bar just sat full while it ran, which reads as a hang.
+    self:beginRefreshPhase(outer_base + outer_span * (1 - AppStore.STORE_SHARE),
+        outer_span * AppStore.STORE_SHARE)
+    -- Not while stopping: that heading is already up, and replacing it would take it back.
+    if AppStore._refresh_progress and not self:refreshCancelled() then
+        AppStore._refresh_progress:setTitle(_("Saving to the cache…"))
+    end
+    local stored = Cache.storeRepos(kind, collected, function(done, total)
+        self:reportRefreshProgress(done / total)
+    end, function()
+        return self:refreshCancelled()
+    end)
     -- Zero, not #collected: the count means rows stored.
-    if not Cache.storeRepos(kind, collected) then
+    if not stored then
         return 0
     end
+    AppStore._refresh_wrote_anything = true
     return #collected
+end
+
+-- Measured on a Kindle 3 with 1475 plugin and 207 patch repositories cached: the plugin
+-- refresh is a single 82 s search, while the patch refresh is a 11 s search followed by a
+-- 55 s walk of every repository's file tree. The bar is split in that proportion, so it
+-- advances at a roughly even pace instead of stalling for a minute at five sixths.
+AppStore.PATCH_SEARCH_SHARE = 0.16
+
+-- Of a search phase, the tail spent writing what was found into SQLite. Measured on a
+-- Kindle 3: 27 s of the plugin refresh's 82 s went on writing 1475 rows, each of them
+-- encoded to JSON on the way in.
+AppStore.STORE_SHARE = 0.33
+
+function AppStore:getRefreshExpectedCount(kind)
+    local counted = Cache.countRepos and Cache.countRepos(kind) or 0
+    -- An empty cache, or one repository, would make the bar jump straight to the end.
+    return math.max(tonumber(counted) or 0, 50)
+end
+
+-- `fraction` is progress within the current phase, 0..1.
+function AppStore:reportRefreshProgress(fraction)
+    local dialog = AppStore._refresh_progress
+    if not dialog then
+        return
+    end
+    fraction = math.min(math.max(tonumber(fraction) or 0, 0), 1)
+    local overall = (AppStore._refresh_phase_base or 0) + (AppStore._refresh_phase_span or 1) * fraction
+    dialog:setFraction(overall)
+end
+
+-- Phases are laid end to end: each one owns a slice of the bar and reports 0..1 inside it.
+function AppStore:beginRefreshPhase(base, span)
+    AppStore._refresh_phase_base = base
+    AppStore._refresh_phase_span = span
+    self:reportRefreshProgress(0)
+end
+
+function AppStore:refreshCancelled()
+    return AppStore._refresh_cancelled == true
 end
 
 function AppStore:refreshCache(kind)
@@ -9568,39 +9705,62 @@ function AppStore:refreshCache(kind)
         return
     end
     self:ensureBrowserState()
+    -- One kind per run: the only caller passes the tab being viewed. There used to be an
+    -- "all" branch here that nothing reached, and its two phases would have claimed the
+    -- same stretch of the progress bar.
     kind = kind or (self.browser_state and self.browser_state.kind) or "plugin"
-    local refresh_plugins = (kind == "plugin") or (kind == "all")
-    local refresh_patches = (kind == "patch") or (kind == "all")
-    if not refresh_plugins and not refresh_patches then
-        return
-    end
+    local refresh_patches = kind == "patch"
+    local refresh_plugins = not refresh_patches
 
     self.is_refreshing = true
     AppStore._refresh_search_incomplete = false
+    AppStore._refresh_wrote_anything = false
     self.patch_cache = {}
     self._repo_descriptors_cache = nil
     -- The stamp in their key would drop them anyway; cleared here so nothing holds a list
     -- built from rows this refresh is about to replace.
     self._filtered_cache = nil
     self._patch_entries_cache = nil
-    local progress = InfoMessage:new{ text = _("Refreshing AppStore cache..."), timeout = 0 }
-    UIManager:show(progress)
+    AppStore._refresh_cancelled = false
+    local AppStoreProgress = require("appstore_progress")
+    local progress = AppStoreProgress:new{
+        title = refresh_patches and _("Refreshing patches…") or _("Refreshing plugins…"),
+        stopping_title = _("Stopping…"),
+        cancel_callback = function()
+            AppStore._refresh_cancelled = true
+        end,
+    }
+    AppStore._refresh_progress = progress
 
     local summary
     local stored_nothing = false
+    -- Opened before the dialog is shown: a throw in between would leave a modal on screen
+    -- with no way to dismiss it, and `is_refreshing` set for the rest of the session.
     local ok, err = pcall(function()
+        -- Before the first report: a widget not yet on screen has no geometry to redraw.
+        progress:show()
+        self:beginRefreshPhase(0, 1)
+        UIManager:forceRePaint()
         local summary_parts = {}
         if refresh_plugins then
+            self:beginRefreshPhase(0, 1)
             local plugin_total = self:fetchAndStore("plugin", PLUGIN_TOPICS, "Plugin", PLUGIN_NAME_QUERIES)
             stored_nothing = plugin_total == 0
             table.insert(summary_parts, string.format(_("Cached %s plugins."), tostring(plugin_total)))
         end
         if refresh_patches then
+            self:beginRefreshPhase(0, AppStore.PATCH_SEARCH_SHARE)
             local patch_total = self:fetchAndStore("patch", PATCH_TOPICS, "Patch", PATCH_NAME_QUERIES)
             stored_nothing = patch_total == 0
-            -- Nothing back means the network is not answering; walking 200 trees would burn
-            -- a timeout apiece before saying so.
-            if not stored_nothing then
+            self:beginRefreshPhase(AppStore.PATCH_SEARCH_SHARE, 1 - AppStore.PATCH_SEARCH_SHARE)
+            -- Five sixths of a patch refresh, under its own name. Skipped whole after a stop
+            -- (the loop checks too, but only past work nobody is waiting for), and after an
+            -- empty search -- the network is not answering, and 200 trees would burn a
+            -- timeout apiece before saying so.
+            if not self:refreshCancelled() and not stored_nothing then
+                if AppStore._refresh_progress then
+                    AppStore._refresh_progress:setTitle(_("Fetching patch file lists…"))
+                end
                 self:refreshPatchFileListings()
             end
             table.insert(summary_parts, string.format(_("Cached %s patch repositories."), tostring(patch_total)))
@@ -9609,18 +9769,28 @@ function AppStore:refreshCache(kind)
         if summary == "" then
             summary = _("AppStore cache refreshed.")
         end
-        -- The rows are untouched after an empty search, so "Cached 0 plugins." would
-        -- contradict both the database and the list on screen.
-        if not stored_nothing then
+        -- This line lives on in the browser header, so it must not describe a run that did
+        -- not finish, nor claim "Cached 0 plugins." over rows that were never replaced.
+        if not self:refreshCancelled() and not stored_nothing then
             AppStoreSettings:saveSetting("status_text", summary)
             AppStoreSettings:flush()
         end
     end)
 
     UIManager:close(progress)
+    AppStore._refresh_progress = nil
     self.is_refreshing = false
+    local cancelled = AppStore._refresh_cancelled
+    AppStore._refresh_cancelled = false
 
-    if not ok then
+    if cancelled then
+        -- The repository list is all or nothing, but the patch file lists are written a
+        -- repository at a time -- and that walk is where a reader is most likely to stop.
+        local text = AppStore._refresh_wrote_anything
+            and _("Refresh stopped. What was already downloaded has been kept.")
+            or _("Refresh stopped. The cache was left as it was.")
+        UIManager:show(InfoMessage:new{ text = text, timeout = 5 })
+    elseif not ok then
         -- Ahead of the incomplete branch, which would otherwise hide it: a rate limit names
         -- what to do about it, "the search did not finish" does not.
         UIManager:show(InfoMessage:new{ text = _("AppStore refresh failed: ") .. tostring(err), timeout = 6 })
@@ -9630,7 +9800,8 @@ function AppStore:refreshCache(kind)
     elseif stored_nothing then
         UIManager:show(InfoMessage:new{ text = _("Nothing came back from GitHub. The cache was left as it was."), timeout = 5 })
     else
-        UIManager:show(InfoMessage:new{ text = summary or _("AppStore cache refreshed."), timeout = 5 })
+        -- Deliberately silent: the browser reopens right behind this and states the counts
+        -- in its own header, and a popup on top of it was one window too many.
     end
 end
 

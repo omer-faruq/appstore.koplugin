@@ -424,19 +424,28 @@ local function getOwnerLogin(owner)
     return ""
 end
 
--- Returns true when the rows were written, false when they were not.
-function Cache.storeRepos(kind, repos)
+-- `on_progress(done, total)` is optional and called while the rows go in: encoding a
+-- thousand API responses to JSON and writing them takes long enough that a caller showing
+-- a progress bar would otherwise sit at its last value for the whole write.
+--
+-- `should_stop()` is asked between rows. Saying yes rolls the transaction back, so the
+-- stored rows are exactly what they were -- the write takes half a minute on a Kindle 3,
+-- and a reader who stops it in the middle is told the cache was left alone.
+-- Returns true when the rows were written, false when the write was abandoned.
+function Cache.storeRepos(kind, repos, on_progress, should_stop)
     if not kind or type(repos) ~= "table" then
         return false
     end
     -- Nothing found is not the same as nothing there. Deleting the kind and committing
-    -- without a single insert would wipe a working cache whenever a search came back
-    -- empty -- a network that answered nothing, say.
+    -- without a single insert would wipe a working cache whenever a search came back empty
+    -- -- a stopped refresh, or a network that answered nothing.
     if #repos == 0 then
         logger.warn("appstore cache: refusing to replace", kind, "rows with an empty result")
         return false
     end
+    local total = #repos
     local fetched_at = os.time()
+    local abandoned = false
     withConnection(function(conn)
         conn:exec("BEGIN;")
         -- Not the whole table: plugins and patches share it, told apart by `kind`, and a
@@ -451,7 +460,19 @@ function Cache.storeRepos(kind, repos)
         local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, fork, data)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
         local stmt = conn:prepare(insert_sql)
-        for _, repo in ipairs(repos) do
+        for index, repo in ipairs(repos) do
+            if on_progress then
+                on_progress(index, total)
+            end
+            -- Asked after on_progress, because that is what gives the interface a chance to
+            -- read the key that says stop.
+            if should_stop and should_stop() then
+                stmt:close()
+                conn:exec("ROLLBACK;")
+                abandoned = true
+                logger.dbg("appstore cache: write abandoned after", index - 1, "of", total)
+                return
+            end
             local owner_login = getOwnerLogin(repo.owner)
             local ok, serialized = pcall(json.encode, repo)
             local encoded = ""
@@ -483,6 +504,10 @@ function Cache.storeRepos(kind, repos)
         stmt:close()
         conn:exec("COMMIT;")
     end)
+    if abandoned then
+        -- The stamp still describes the rows that are still there.
+        return false
+    end
     -- Only once the rows are in: an empty refresh must keep reading as empty.
     -- `false` rather than `nil`: nil means "not asked yet" and sends every render
     -- back to the database.
@@ -596,6 +621,19 @@ function Cache.listRepos(kind)
         table.insert(result, makeRow(row))
     end
     return result
+end
+
+-- How many rows of a kind are cached. Asked before a refresh, to size its progress bar
+-- against what the previous one found; counting in SQLite avoids materialising the list.
+function Cache.countRepos(kind)
+    return withConnection(function(conn)
+        local stmt = conn:prepare([[SELECT COUNT(1) FROM repos WHERE kind = ?;]])
+        stmt:bind(kind)
+        local row = stmt:step()
+        local value = row and row[1] or 0
+        stmt:close()
+        return tonumber(value) or 0
+    end)
 end
 
 function Cache.getLastFetched(kind)
