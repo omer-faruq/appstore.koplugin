@@ -1147,8 +1147,10 @@ local function listInstalledPlugins()
                     local scan = scanned.by_path[path]
                     if not scan then
                         local meta = loadPluginMeta(root, entry)
+                        -- Not kept: name and version are everything anyone reads out of it,
+                        -- and they are taken here. Holding the parsed table would keep one
+                        -- alive per installed plugin for as long as KOReader runs.
                         scan = {
-                            meta = meta,
                             name = getPluginDisplayName(meta, entry),
                             version = meta and meta.version or nil,
                             latest_mtime = getLatestModificationTimestamp(path),
