@@ -356,4 +356,6 @@ return {
     ["Missing README path"] = "Chemin du README manquant",
     ["Unable to read README file"] = "Impossible de lire le fichier README",
     ["Discover and manage community plugins and patches from GitHub topics."] = "Découvrez et gérez les plugins et patchs communautaires à partir des sujets GitHub.",
+    ["Nothing came back from GitHub. The cache was left as it was."] = "GitHub n'a rien renvoyé. Le cache est resté inchangé.",
+    ["The search did not finish. The cache was left as it was."] = "La recherche ne s'est pas terminée. Le cache est resté inchangé.",
 }

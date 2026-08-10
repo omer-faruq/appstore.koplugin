@@ -7067,10 +7067,12 @@ local function formatRepoEntry(repo, opts)
     return table.concat(lines, "\n")
 end
 
+-- The patch files in the repository's tree, or nil if the tree could not be read: an empty
+-- table is an answer, nil is the absence of one, and writers must tell them apart.
 function AppStore:fetchPatchEntriesFromGitHub(repo)
     local owner = extractRepoOwner(repo)
     if not owner or not repo.name then
-        return {}
+        return nil
     end
     local branch = (repo.data and repo.data.default_branch)
         or repo.default_branch
@@ -7078,7 +7080,7 @@ function AppStore:fetchPatchEntriesFromGitHub(repo)
     local tree, err = GitHub.fetchRepoTree(owner, repo.name, branch)
     if not tree or type(tree.tree) ~= "table" then
         logger.warn("AppStore patch tree fetch failed", repo.full_name or repo.name, err)
-        return {}
+        return nil
     end
     local entries = {}
     for _, node in ipairs(tree.tree) do
@@ -7103,13 +7105,20 @@ function AppStore:fetchPatchEntriesFromGitHub(repo)
     return entries
 end
 
+-- Returns true when the repository's rows were written.
 function AppStore:storePatchEntriesForRepo(repo, source_pushed_at)
     local repo_id = repo.repo_id or repo.id
     if not repo_id then
-        return
+        return false
     end
     local entries = self:fetchPatchEntriesFromGitHub(repo)
+    -- storePatchFiles clears the repository's rows before inserting, so writing the nothing
+    -- a failed request returned would delete the patches on record.
+    if not entries then
+        return false
+    end
     Cache.storePatchFiles(repo_id, entries, source_pushed_at)
+    return true
 end
 
 -- Incremental refresh of every patch repository's patch_files rows.
@@ -7147,7 +7156,7 @@ function AppStore:refreshPatchFileListingsInSession()
     -- repository, and asking them one at a time reopened the database twice per repo.
     local summary = Cache.getPatchFileSummaryByRepo and Cache.getPatchFileSummaryByRepo() or nil
 
-    local refreshed, skipped = 0, 0
+    local refreshed, skipped, failed = 0, 0, 0
     for _, repo in ipairs(patch_repos) do
         local repo_id = tonumber(repo.repo_id or repo.id)
         -- The column, not the blob: this runs for every patch repository.
@@ -7179,13 +7188,17 @@ function AppStore:refreshPatchFileListingsInSession()
             or (cached_count == 0)
 
         if must_refetch then
-            self:storePatchEntriesForRepo(repo, remote_pushed_at)
-            refreshed = refreshed + 1
+            if self:storePatchEntriesForRepo(repo, remote_pushed_at) then
+                refreshed = refreshed + 1
+            else
+                failed = failed + 1
+            end
         else
             skipped = skipped + 1
         end
     end
-    logger.dbg("AppStore patch tree refresh: refreshed=", refreshed, "skipped=", skipped)
+    logger.dbg("AppStore patch tree refresh: refreshed=", refreshed,
+        "failed=", failed, "skipped=", skipped)
 end
 
 -- Rows arrive ordered by filename from SQLite, so the list is built in place.
@@ -9349,6 +9362,9 @@ local function performSearchPage(query, page, per_page)
         if type(err) == "table" and err.is_rate_limit then
             error(buildRateLimitMessage())
         end
+        -- Recorded in the one call every branch, bisection and page goes through: a failed
+        -- branch is only logged, so what the search collected is partial, not smaller.
+        AppStore._refresh_search_incomplete = true
     end
     return response, err
 end
@@ -9533,7 +9549,17 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries)
         end
     end
 
-    Cache.storeRepos(kind, collected)
+    -- Losing Wi-Fi halfway through a minute-long search would otherwise replace 1479 cached
+    -- repositories with the 300 that arrived before it went.
+    if AppStore._refresh_search_incomplete then
+        logger.warn("AppStore: search incomplete, leaving the", kind, "cache as it was")
+        return 0
+    end
+
+    -- Zero, not #collected: the count means rows stored.
+    if not Cache.storeRepos(kind, collected) then
+        return 0
+    end
     return #collected
 end
 
@@ -9550,6 +9576,7 @@ function AppStore:refreshCache(kind)
     end
 
     self.is_refreshing = true
+    AppStore._refresh_search_incomplete = false
     self.patch_cache = {}
     self._repo_descriptors_cache = nil
     -- The stamp in their key would drop them anyway; cleared here so nothing holds a list
@@ -9560,33 +9587,50 @@ function AppStore:refreshCache(kind)
     UIManager:show(progress)
 
     local summary
+    local stored_nothing = false
     local ok, err = pcall(function()
         local summary_parts = {}
         if refresh_plugins then
             local plugin_total = self:fetchAndStore("plugin", PLUGIN_TOPICS, "Plugin", PLUGIN_NAME_QUERIES)
+            stored_nothing = plugin_total == 0
             table.insert(summary_parts, string.format(_("Cached %s plugins."), tostring(plugin_total)))
         end
         if refresh_patches then
             local patch_total = self:fetchAndStore("patch", PATCH_TOPICS, "Patch", PATCH_NAME_QUERIES)
-            self:refreshPatchFileListings()
+            stored_nothing = patch_total == 0
+            -- Nothing back means the network is not answering; walking 200 trees would burn
+            -- a timeout apiece before saying so.
+            if not stored_nothing then
+                self:refreshPatchFileListings()
+            end
             table.insert(summary_parts, string.format(_("Cached %s patch repositories."), tostring(patch_total)))
         end
         summary = table.concat(summary_parts, " ")
         if summary == "" then
             summary = _("AppStore cache refreshed.")
         end
-        AppStoreSettings:saveSetting("status_text", summary)
-        AppStoreSettings:flush()
+        -- The rows are untouched after an empty search, so "Cached 0 plugins." would
+        -- contradict both the database and the list on screen.
+        if not stored_nothing then
+            AppStoreSettings:saveSetting("status_text", summary)
+            AppStoreSettings:flush()
+        end
     end)
 
     UIManager:close(progress)
     self.is_refreshing = false
 
-    if ok then
-        UIManager:show(InfoMessage:new{ text = summary or _("AppStore cache refreshed."), timeout = 5 })
+    if not ok then
+        -- Ahead of the incomplete branch, which would otherwise hide it: a rate limit names
+        -- what to do about it, "the search did not finish" does not.
+        UIManager:show(InfoMessage:new{ text = _("AppStore refresh failed: ") .. tostring(err), timeout = 6 })
+    elseif AppStore._refresh_search_incomplete then
+        -- Not "nothing came back": something did, and that is why the cache was kept.
+        UIManager:show(InfoMessage:new{ text = _("The search did not finish. The cache was left as it was."), timeout = 6 })
+    elseif stored_nothing then
+        UIManager:show(InfoMessage:new{ text = _("Nothing came back from GitHub. The cache was left as it was."), timeout = 5 })
     else
-        local message = tostring(err)
-        UIManager:show(InfoMessage:new{ text = _("AppStore refresh failed: ") .. message, timeout = 6 })
+        UIManager:show(InfoMessage:new{ text = summary or _("AppStore cache refreshed."), timeout = 5 })
     end
 end
 

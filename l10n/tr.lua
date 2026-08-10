@@ -356,4 +356,6 @@ return {
     ["Missing README path"] = "README yolu eksik",
     ["Unable to read README file"] = "README dosyası okunamıyor",
     ["Discover and manage community plugins and patches from GitHub topics."] = "GitHub konularından topluluk eklentilerini ve yamalarını keşfedin ve yönetin.",
+    ["Nothing came back from GitHub. The cache was left as it was."] = "GitHub'dan hiçbir şey gelmedi. Önbellek olduğu gibi bırakıldı.",
+    ["The search did not finish. The cache was left as it was."] = "Arama tamamlanmadı. Önbellek olduğu gibi bırakıldı.",
 }

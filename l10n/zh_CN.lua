@@ -356,4 +356,6 @@ return {
     ["Missing README path"] = "缺少 README 路径",
     ["Unable to read README file"] = "无法读取 README 文件",
     ["Discover and manage community plugins and patches from GitHub topics."] = "从 GitHub 主题中发现并管理社区插件和补丁。",
+    ["Nothing came back from GitHub. The cache was left as it was."] = "GitHub 未返回任何内容。缓存保持原样。",
+    ["The search did not finish. The cache was left as it was."] = "搜索未完成。缓存保持原样。",
 }
