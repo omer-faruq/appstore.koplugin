@@ -6879,10 +6879,12 @@ function AppStore:browserListCacheKey(kind)
         tostring(state.sort_mode or ""),
         -- Identity, not contents: the table is rebuilt whenever the remote search reruns.
         tostring(self.readme_filter),
-        -- Filtering the patch tab reads patch rows too, through repoHasMatchingPatch, so
-        -- both lists that depend on them count the same generation. Safe today only
-        -- because the one writer clears both caches -- an asymmetry outlives its reason.
-        tostring(self._patch_cache_generation or 0),
+        -- The patch tab reads patch rows twice over -- the aggregate is built from them,
+        -- and filtering reaches them through repoHasMatchingPatch -- so both count the
+        -- same generation. The plugin tab never looks at them, and the generation only
+        -- moves while the patch tab is open, so counting it there would drop a list on
+        -- the way back that never depended on what changed.
+        kind == "patch" and tostring(self._patch_cache_generation or 0) or "",
     }, "\0")
 end
 
