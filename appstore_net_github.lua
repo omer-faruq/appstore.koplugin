@@ -1,5 +1,6 @@
 ﻿local http = require("socket.http")
 local json = require("json")
+local socketutil = require("socketutil")
 local url = require("socket.url")
 local logger = require("logger")
 
@@ -18,15 +19,6 @@ local function joinQueryParts(parts)
         return ""
     end
     return table.concat(parts, " ")
-end
-
-local function newTableSink(target)
-    return function(chunk, err)
-        if chunk then
-            target[#target + 1] = chunk
-        end
-        return 1, err
-    end
 end
 
 local function getAuthHeaders()
@@ -61,13 +53,25 @@ local function request(path, query)
             headers[key] = value
         end
     end
+    -- Without a deadline a single stalled connection hangs the interface for good: every
+    -- one of these runs on the UI thread. The API answers in well under a second when it
+    -- answers at all, so the large-content values are already generous.
+    --
+    -- socketutil's own sink is what enforces the *total* timeout: the socket-level one is
+    -- restarted on every receive, so a connection that dribbles a byte at a time would
+    -- otherwise outlast it. Built after set_timeout, which is where it reads the deadline.
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local _, code = http.request{
         url = target,
         headers = headers,
-        sink = newTableSink(response_body),
+        sink = socketutil.table_sink(response_body),
     }
+    socketutil:reset_timeout()
     local body = table.concat(response_body)
-    return tonumber(code), body
+    -- A timeout reports itself as a string where a status would be. Callers only ever
+    -- compare against 200, so passing it through keeps them working and names the reason
+    -- in their logs instead of turning it into a bare nil.
+    return tonumber(code) or code, body
 end
 
 local function buildQuery(opts)

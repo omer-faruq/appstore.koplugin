@@ -46,7 +46,6 @@ local NetworkMgr = require("ui/network/manager")
 local socketutil = require("socketutil")
 local socket = require("socket")
 local http = require("socket.http")
-local ltn12 = require("ltn12")
 local Archiver = require("ffi/archiver")
 local sha2 = require("ffi/sha2")
 local lfs = require("libs/libkoreader-lfs")
@@ -2305,7 +2304,6 @@ function AppStore:checkAllUpdates()
     NetworkMgr:runWhenOnline(function()
         local Trapper = require("ui/trapper")
         local http = require("socket.http")
-        local ltn12 = require("ltn12")
         local GitHub = require("appstore_net_github")
 
         local function parseGitHubTimestampWorker(ts)
@@ -2333,15 +2331,20 @@ function AppStore:checkAllUpdates()
             branch = branch or "HEAD"
             local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path)
             local response = {}
+            -- Off the UI thread here, but a subprocess that never returns still leaves the
+            -- check hanging and its zombie behind. socketutil's sink is what enforces the
+            -- total timeout -- the socket-level one restarts on every receive.
+            socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
             local _, code = http.request{
                 url = url,
-                sink = ltn12.sink.table(response),
+                sink = socketutil.table_sink(response),
                 headers = {
                     ["User-Agent"] = "KOReader-AppStore",
                     ["Accept"] = "text/plain",
                 },
             }
-            code = tonumber(code)
+            socketutil:reset_timeout()
+            code = tonumber(code) or code
             if code ~= 200 then
                 return nil, string.format("HTTP %s", tostring(code))
             end
@@ -4204,15 +4207,21 @@ fetchGitHubRaw = function(owner, repo_name, branch, path)
     branch = branch or "HEAD"
     local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path)
     local response = {}
+    -- On the UI thread: a stalled connection would hold the whole interface. socketutil's
+    -- sink is what enforces the total timeout -- the socket-level one restarts on every
+    -- receive, so a connection dribbling a byte at a time would outlast it.
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local _, code = http.request{
         url = url,
-        sink = ltn12.sink.table(response),
+        sink = socketutil.table_sink(response),
         headers = {
             ["User-Agent"] = "KOReader-AppStore",
             ["Accept"] = "text/plain",
         },
     }
-    code = tonumber(code)
+    socketutil:reset_timeout()
+    -- Timeouts report a string here, and tonumber would flatten every one of them to nil.
+    code = tonumber(code) or code
     if code ~= 200 then
         return nil, string.format("HTTP %s", tostring(code))
     end

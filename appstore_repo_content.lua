@@ -4,7 +4,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local FileManager = require("apps/filemanager/filemanager")
 local _ = require("appstore_gettext")
 local http = require("socket.http")
-local ltn12 = require("ltn12")
+local socketutil = require("socketutil")
 local util = require("util")
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
@@ -34,15 +34,22 @@ end
 
 local function download(url)
     local response = {}
+    -- This runs on the UI thread: a connection that never answers would otherwise hold the
+    -- interface until KOReader is restarted. socketutil's sink is what enforces the total
+    -- timeout -- the socket-level one restarts on every receive.
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local _, code = http.request{
         url = url,
-        sink = ltn12.sink.table(response),
+        sink = socketutil.table_sink(response),
         headers = {
             ["Accept"] = "text/plain",
             ["User-Agent"] = "KOReader-AppStore",
         },
     }
-    return tonumber(code), table.concat(response)
+    socketutil:reset_timeout()
+    -- A timeout arrives as a string in place of a status; keep it, so the caller's
+    -- "not 200" check still fires and the reason reaches the log.
+    return tonumber(code) or code, table.concat(response)
 end
 
 -- Download and clean the raw README body, shared by the cached and
