@@ -664,10 +664,31 @@ local function buildPatchSummary(remote_info)
         else
             summary.unmatched = summary.unmatched + 1
         end
-        local local_sha = computeFileSha1(installed_patch.path)
         local remote_entry = remote_info and remote_info[installed_patch.filename]
         local remote_sha = (remote_entry and remote_entry.remote_sha)
             or (record and record.sha)
+        -- Hashing reads the whole file off the card, and this runs for every installed patch
+        -- on every rebuild of the dialog. The value is only needed for records that pre-date
+        -- SHA storage; anything else asks for it later, one patch at a time. Remembered per
+        -- file, keyed on what would change its contents.
+        local local_sha
+        if record and remote_sha and not record.sha then
+            local sha_cache = AppStore._patch_sha_cache
+            if not sha_cache then
+                sha_cache = {}
+                AppStore._patch_sha_cache = sha_cache
+            end
+            local sha_key = string.format("%s|%s|%s", installed_patch.path,
+                tostring(installed_patch.latest_mtime), tostring(installed_patch.size))
+            local_sha = sha_cache[sha_key]
+            if local_sha == nil then
+                local_sha = computeFileSha1(installed_patch.path) or false
+                sha_cache[sha_key] = local_sha
+            end
+            if local_sha == false then
+                local_sha = nil
+            end
+        end
         -- installed_sha: the SHA recorded at install/update time.
         -- Comparing remote_sha against this (not local_sha) means user edits to
         -- the local file do NOT trigger a false "update available" — only a real
@@ -1105,25 +1126,52 @@ local function getLatestModificationTimestamp(path)
     return latest
 end
 
+-- Reading one plugin costs a dofile of its _meta.lua and an lfs.attributes for every file
+-- below it. The updates dialog is rebuilt on every page flip, so that part is remembered per
+-- directory and only redone once the install store reports a change. The directory listing
+-- itself still runs every time, so a plugin copied in by hand shows up straight away.
 local function listInstalledPlugins()
     local plugins = {}
     local hidden_paths = AppStoreSettings:readSetting(PluginPaths.HIDDEN_PLUGIN_PATHS_KEY) or {}
+    local generation = InstallStore.getGeneration and InstallStore.getGeneration() or 0
+    local scanned = AppStore._installed_scan_cache
+    if not scanned or scanned.generation ~= generation then
+        scanned = { generation = generation, by_path = {} }
+        AppStore._installed_scan_cache = scanned
+    end
     for _, root in ipairs(PluginPaths.getLookupPaths()) do
         if lfs.attributes(root, "mode") == "directory" and not PluginPaths.isPathHidden(root, hidden_paths) then
             for entry in lfs.dir(root) do
                 if entry ~= "." and entry ~= ".." and entry:match("%.koplugin$") then
-                    local meta = loadPluginMeta(root, entry)
-                    local plugin = {
+                    local path = root .. "/" .. entry
+                    local scan = scanned.by_path[path]
+                    if not scan then
+                        local meta = loadPluginMeta(root, entry)
+                        scan = {
+                            meta = meta,
+                            name = getPluginDisplayName(meta, entry),
+                            version = meta and meta.version or nil,
+                            latest_mtime = getLatestModificationTimestamp(path),
+                        }
+                        scanned.by_path[path] = scan
+                    end
+                    -- A fresh table per call: callers fill in their own fields. One of them
+                    -- computes latest_mtime when the scan came back without it, and writes
+                    -- it into the scan as well so the next rebuild inherits it.
+                    --
+                    -- The parsed _meta.lua itself is not handed out. Nothing reads it --
+                    -- name and version are taken from it once, here -- and sharing one
+                    -- parsed table across calls that used to get their own would have bitten
+                    -- quietly the day something wrote to it.
+                    table.insert(plugins, {
                         dirname = entry,
-                        meta = meta,
-                        name = getPluginDisplayName(meta, entry),
-                        version = meta and meta.version or nil,
+                        name = scan.name,
+                        version = scan.version,
                         root = root,
-                        path = root .. "/" .. entry,
+                        path = path,
                         meta_path_hint = entry .. "/_meta.lua",
-                    }
-                    plugin.latest_mtime = getLatestModificationTimestamp(plugin.path)
-                    table.insert(plugins, plugin)
+                        latest_mtime = scan.latest_mtime,
+                    })
                 end
             end
         end
@@ -1248,6 +1296,15 @@ function AppStore:collectUpdateSummary()
         if not local_latest_ts or local_latest_ts == 0 then
             local_latest_ts = getLatestModificationTimestamp(plugin.path)
             plugin.latest_mtime = local_latest_ts
+            -- Back into the scan too, not just this call's copy. The row is rebuilt every
+            -- time the list is; without this, plugins whose scan came back with nothing
+            -- walk their whole directory again on each rebuild -- the very cost the scan
+            -- cache was added to remove.
+            local scanned = AppStore._installed_scan_cache
+            local scan = scanned and scanned.by_path and scanned.by_path[plugin.path]
+            if scan then
+                scan.latest_mtime = local_latest_ts
+            end
         end
         
         local has_update = false
@@ -2961,8 +3018,13 @@ function AppStore:promptPatchUpdateAction(patch_item)
     else
         table.insert(lines, _("Not matched with a repository."))
     end
-    if patch_item.local_sha then
-        table.insert(lines, string.format(_("Local SHA: %s"), patch_item.local_sha:sub(1, 8)))
+    -- One patch, on demand: the summary no longer hashes them all up front.
+    local local_sha = patch_item.local_sha
+    if not local_sha and patch_item.patch then
+        local_sha = computeFileSha1(patch_item.patch.path)
+    end
+    if local_sha then
+        table.insert(lines, string.format(_("Local SHA: %s"), local_sha:sub(1, 8)))
     end
     table.insert(lines, formatPatchRemoteStatus(remote_entry))
     if patch_item.needs_update then
@@ -6186,11 +6248,9 @@ function AppStore:repoMatchesSearch(repo, search)
     addField(repo.name)
     addField(repo.description)
     addField(repo.language)
-    if repo.data and type(repo.data.topics) == "table" then
-        for _, topic in ipairs(repo.data.topics) do
-            addField(topic)
-        end
-    end
+    -- From the column, not `data`: reaching into the blob here would decode every cached
+    -- repository on the first search.
+    addField(repo.topics)
     if #haystacks == 0 then
         return false
     end
@@ -6279,28 +6339,72 @@ local function repoStarsValue(repo)
         or 0
 end
 
+-- Kept on the entry: sorting asks once per comparison, and parseGitHubTimestamp matches a
+-- pattern and builds a table for os.time -- thousands of times per rebuild otherwise.
 local function repoUpdatedValue(repo)
+    local cached = repo._pushed_ts
+    if cached ~= nil then
+        return cached
+    end
     -- For ordering, only consider pushed_at (last pushed commit).
     -- Repos with no pushes get value 0 and sink to the bottom.
-    if repo.data and repo.data.pushed_at then
-        return parseGitHubTimestamp(repo.data.pushed_at)
+    -- Column first, so ordering doesn't need the API response.
+    local pushed_at = repo.pushed_at
+    if pushed_at == nil then
+        pushed_at = repo.data and repo.data.pushed_at
     end
-    return 0
+    local value = 0
+    if pushed_at and pushed_at ~= "" then
+        value = parseGitHubTimestamp(pushed_at)
+    end
+    repo._pushed_ts = value
+    return value
 end
 
 local function repoCreatedValue(repo)
-    if repo.data and repo.data.created_at then
-        return parseGitHubTimestamp(repo.data.created_at)
+    local cached = repo._created_ts
+    if cached ~= nil then
+        return cached
     end
-    return 0
+    local created_at = repo.created_at
+    if created_at == nil then
+        created_at = repo.data and repo.data.created_at
+    end
+    local value = 0
+    if created_at and created_at ~= "" then
+        value = parseGitHubTimestamp(created_at)
+    end
+    repo._created_ts = value
+    return value
 end
 
+-- A sort asks for the same key once per comparison, which is thousands of times over a
+-- full list; trimming and lowercasing is not free, so keep it on the row, as with the
+-- parsed timestamps.
 local function repoNameKey(repo)
-    return normalizedLower(repo.name or repo.full_name or "")
+    local cached = repo._name_key
+    if cached ~= nil then
+        return cached
+    end
+    local value = normalizedLower(repo.name or repo.full_name or "")
+    repo._name_key = value
+    return value
 end
 
+-- Kept on the patch rather than on the aggregate row: the rows are rebuilt for every page
+-- turn, the patches behind them live in the per-repository cache.
 local function patchNameKey(entry)
-    return normalizedLower(entry.patch and entry.patch.filename or "")
+    local patch = entry.patch
+    if not patch then
+        return ""
+    end
+    local cached = patch._name_key
+    if cached ~= nil then
+        return cached
+    end
+    local value = normalizedLower(patch.filename or "")
+    patch._name_key = value
+    return value
 end
 
 local function compareRepoStarsDesc(a, b)
@@ -6533,11 +6637,52 @@ function AppStore:saveBrowserState()
     }
     self.browser_state.scroll_offset = state.scroll_offset
     local ok, encoded = pcall(json.encode, state)
-    if ok then
-        AppStoreSettings:saveSetting(BROWSER_STATE_KEY, encoded)
-        AppStoreSettings:flush()
+    if not ok then
+        return
     end
+    -- Page turns save twice -- once for the new page, once for the outgoing dialog's
+    -- scroll position -- and often with nothing new to say.
+    if encoded == self._browser_state_written then
+        return
+    end
+    self._browser_state_written = encoded
+    AppStoreSettings:saveSetting(BROWSER_STATE_KEY, encoded)
+    -- In memory now, on disk shortly. Flushing here is a synchronous write to slow
+    -- storage: 9-21 ms measured on a Kindle 3, against ~30 ms for the whole page. The
+    -- deferred write is coalesced, and forced when KOReader flushes its own settings.
+    self._browser_state_unwritten = true
+    if self._browser_state_flush_task then
+        UIManager:unschedule(self._browser_state_flush_task)
+    end
+    self._browser_state_flush_task = function()
+        self._browser_state_flush_task = nil
+        self:flushBrowserState()
+    end
+    UIManager:scheduleIn(5, self._browser_state_flush_task)
 end
+
+function AppStore:flushBrowserState()
+    if not self._browser_state_unwritten then
+        return
+    end
+    self._browser_state_unwritten = false
+    AppStoreSettings:flush()
+end
+
+-- Broadcast before suspend and on the way out, which is exactly when a deferred write has
+-- to land.
+function AppStore:onFlushSettings()
+    if self._browser_state_flush_task then
+        UIManager:unschedule(self._browser_state_flush_task)
+        self._browser_state_flush_task = nil
+    end
+    self:flushBrowserState()
+end
+
+-- Same on the way out of the plugin. Harmless to leave a write scheduled -- the settings
+-- object outlives us -- but a task pointing at a closed plugin is the kind of thing that
+-- stops being harmless quietly.
+AppStore.onCloseWidget = AppStore.onFlushSettings
 
 function AppStore:ensureBrowserState()
     if not self.browser_state then
@@ -6718,8 +6863,42 @@ function AppStore:descriptorMatches(repo, filters)
     return true
 end
 
+-- Everything a filtered, sorted list depends on, in one string. Page number is absent on
+-- purpose: turning a page changes which slice is shown, not what the list holds.
+function AppStore:browserListCacheKey(kind)
+    self:ensureBrowserState()
+    local state = self.browser_state
+    return table.concat({
+        tostring(kind),
+        -- Same stamp the descriptor cache watches: a refresh moves it and drops both.
+        tostring(Cache.getLastFetched and Cache.getLastFetched(kind)),
+        tostring(state.search_text or ""),
+        tostring(state.search_in_readme),
+        tostring(state.owner or ""),
+        tostring(state.min_stars or 0),
+        tostring(state.sort_mode or ""),
+        -- Identity, not contents: the table is rebuilt whenever the remote search reruns.
+        tostring(self.readme_filter),
+        -- Filtering the patch tab reads patch rows too, through repoHasMatchingPatch, so
+        -- both lists that depend on them count the same generation. Safe today only
+        -- because the one writer clears both caches -- an asymmetry outlives its reason.
+        tostring(self._patch_cache_generation or 0),
+    }, "\0")
+end
+
 function AppStore:getFilteredDescriptors(kind)
     self:ensureBrowserState()
+    -- Rebuilt for every page turn, though only the visible slice changes. Filtering and
+    -- sorting the whole list again cost 40-150 ms a page on a Kindle 3.
+    local cache_key = self:browserListCacheKey(kind)
+    -- A slot per kind. With a single slot, every tab switch threw the other list away and
+    -- refiltered from scratch -- and since switching resets the filters, each tab's key
+    -- settles down, so the slot hits on the way back.
+    self._filtered_cache = self._filtered_cache or {}
+    local cached = self._filtered_cache[kind]
+    if cached and cached.key == cache_key then
+        return cached.filtered, cached.total
+    end
     local descriptors = self:getRepoDescriptors(kind)
     local filtered = {}
     local search = normalizedLower(self.browser_state.search_text)
@@ -6785,6 +6964,7 @@ function AppStore:getFilteredDescriptors(kind)
         end
     end
     self:sortRepoList(filtered)
+    self._filtered_cache[kind] = { key = cache_key, filtered = filtered, total = #descriptors }
     return filtered, #descriptors
 end
 
@@ -6827,12 +7007,27 @@ function AppStore:getCacheWarning(kind)
     return nil, false
 end
 
--- Returns true when the raw GitHub repo payload marks this entry as a fork.
--- The full API response is cached as `repo.data`, so no extra request is needed.
+-- Returns true when GitHub marks this entry as a fork. Asked once per rendered row,
+-- so it reads the column rather than the cached response.
 local function repoIsFork(repo)
-    if not repo then return false end
-    if repo.fork == true then return true end
-    return repo.data and repo.data.fork == true or false
+    return repo ~= nil and repo.fork == true
+end
+
+-- The date shown as "Updated:". Columns first, so the two sources can't drift apart;
+-- the response is only worth opening when neither column was stored.
+local function repoUpdatedStamp(repo)
+    local ts = repo.pushed_at
+    if ts == nil or ts == "" then
+        ts = repo.created_at
+    end
+    if ts == nil or ts == "" then
+        local data = repo.data
+        ts = data and (data.pushed_at or data.updated_at or data.created_at)
+    end
+    if type(ts) ~= "string" or ts == "" then
+        return nil
+    end
+    return ts
 end
 
 local function formatRepoEntry(repo, opts)
@@ -6852,8 +7047,8 @@ local function formatRepoEntry(repo, opts)
     if include_description and description ~= "" then
         table.insert(lines, "  " .. truncateText(description, 200))
     end
-    local ts = repo.data and (repo.data.pushed_at or repo.data.created_at)
-    if include_updated and ts and type(ts) == "string" then
+    local ts = repoUpdatedStamp(repo)
+    if include_updated and ts then
         table.insert(lines, "  " .. string.format(_("Updated: %s"), ts:sub(1, 10)))
     end
     return table.concat(lines, "\n")
@@ -6910,7 +7105,18 @@ end
 -- we successfully downloaded the tree. Unchanged repos skip the git/trees
 -- API call entirely. Repos that dropped out of the search results are pruned
 -- so that stale rows never survive across refreshes.
+-- A full pass over every patch repository: downloads and writes run back to back with
+-- nobody waiting between them, so the database is opened once for the whole run.
 function AppStore:refreshPatchFileListings()
+    if Cache.withSession then
+        return Cache.withSession(function()
+            return self:refreshPatchFileListingsInSession()
+        end)
+    end
+    return self:refreshPatchFileListingsInSession()
+end
+
+function AppStore:refreshPatchFileListingsInSession()
     local patch_repos = self:getRepoDescriptors("patch")
 
     local valid_repo_ids = {}
@@ -6924,18 +7130,30 @@ function AppStore:refreshPatchFileListings()
         Cache.pruneOrphanPatchFiles(valid_repo_ids)
     end
 
+    -- One query for the whole list: both questions below are asked about every
+    -- repository, and asking them one at a time reopened the database twice per repo.
+    local summary = Cache.getPatchFileSummaryByRepo and Cache.getPatchFileSummaryByRepo() or nil
+
     local refreshed, skipped = 0, 0
     for _, repo in ipairs(patch_repos) do
         local repo_id = tonumber(repo.repo_id or repo.id)
-        local remote_pushed_at = repo.data and repo.data.pushed_at
+        -- The column, not the blob: this runs for every patch repository.
+        local remote_pushed_at = repo.pushed_at
         if type(remote_pushed_at) ~= "string" or remote_pushed_at == "" then
             remote_pushed_at = nil
         end
 
-        local cached_pushed_at = repo_id and Cache.getPatchFilePushedAt
-            and Cache.getPatchFilePushedAt(repo_id) or nil
-        local cached_count = (repo_id and Cache.countPatchFiles)
-            and Cache.countPatchFiles(repo_id) or 0
+        local stored = summary and repo_id and summary[repo_id]
+        local cached_pushed_at, cached_count
+        if summary then
+            cached_pushed_at = stored and stored.pushed_at or nil
+            cached_count = stored and stored.count or 0
+        else
+            cached_pushed_at = repo_id and Cache.getPatchFilePushedAt
+                and Cache.getPatchFilePushedAt(repo_id) or nil
+            cached_count = (repo_id and Cache.countPatchFiles)
+                and Cache.countPatchFiles(repo_id) or 0
+        end
 
         -- A tree fetch is required when any of the following is true:
         --   * We have no recorded pushed_at for this repo (first run after the
@@ -6957,38 +7175,41 @@ function AppStore:refreshPatchFileListings()
     logger.dbg("AppStore patch tree refresh: refreshed=", refreshed, "skipped=", skipped)
 end
 
+-- Rows arrive ordered by filename from SQLite, so the list is built in place.
+function AppStore:patchEntriesFromRows(rows)
+    local entries = {}
+    for _, row in ipairs(rows or {}) do
+        local filename = row.filename or (row.path and row.path:match("([^/]+)$"))
+        if filename then
+            entries[#entries + 1] = {
+                filename = filename,
+                path = row.path,
+                display_path = row.path,
+                download_url = row.download_url,
+                branch = row.branch or "HEAD",
+                sha = row.sha,
+                size = row.size,
+            }
+        end
+    end
+    return entries
+end
+
+function AppStore:patchCacheKey(repo)
+    return repo.repo_id or repo.id or repo.full_name or repo.name or "repo"
+end
+
 function AppStore:getPatchEntriesForRepo(repo)
     self.patch_cache = self.patch_cache or {}
     local repo_id = repo.repo_id or repo.id
-    local key = repo_id or repo.full_name or repo.name or "repo"
+    local key = self:patchCacheKey(repo)
     local cache = self.patch_cache[key]
     local now = os.time()
     if cache and cache.entries and cache.timestamp and (now - cache.timestamp) < PATCH_CACHE_TTL then
         return cache.entries
     end
 
-    local entries = {}
-    if repo_id then
-        local rows = Cache.listPatchFiles(repo_id)
-        for _, row in ipairs(rows) do
-            local filename = row.filename or (row.path and row.path:match("([^/]+)$"))
-            if filename then
-                table.insert(entries, {
-                    filename = filename,
-                    path = row.path,
-                    display_path = row.path,
-                    download_url = row.download_url,
-                    branch = row.branch or "HEAD",
-                    sha = row.sha,
-                    size = row.size,
-                })
-            end
-        end
-    end
-
-    table.sort(entries, function(a, b)
-        return (a.filename or "") < (b.filename or "")
-    end)
+    local entries = repo_id and self:patchEntriesFromRows(Cache.listPatchFiles(repo_id)) or {}
     self.patch_cache[key] = {
         entries = entries,
         timestamp = now,
@@ -6996,7 +7217,48 @@ function AppStore:getPatchEntriesForRepo(repo)
     return entries
 end
 
+-- Fills the per-repo cache with a single query. The browser aggregates across the whole
+-- list, so asking repository by repository opened the database (and ran its PRAGMAs)
+-- once per repository -- a couple of hundred times per page.
+function AppStore:preloadPatchEntries(repos)
+    if not Cache.listPatchFilesByRepo then
+        return
+    end
+    self.patch_cache = self.patch_cache or {}
+    local now = os.time()
+    local stale = false
+    for _, repo in ipairs(repos) do
+        local cache = self.patch_cache[self:patchCacheKey(repo)]
+        if not (cache and cache.entries and cache.timestamp
+                and (now - cache.timestamp) < PATCH_CACHE_TTL) then
+            stale = true
+            break
+        end
+    end
+    if not stale then
+        return
+    end
+
+    local grouped = Cache.listPatchFilesByRepo()
+    self._patch_cache_generation = (self._patch_cache_generation or 0) + 1
+    for _, repo in ipairs(repos) do
+        local repo_id = tonumber(repo.repo_id or repo.id)
+        self.patch_cache[self:patchCacheKey(repo)] = {
+            entries = self:patchEntriesFromRows(repo_id and grouped[repo_id] or {}),
+            timestamp = now,
+        }
+    end
+end
+
 function AppStore:collectPatchEntries(repos)
+    self:preloadPatchEntries(repos)
+    -- Same reasoning as the filtered list: a page turn does not change the aggregate. The
+    -- shared key already counts the patch cache generation these rows are built from.
+    local cache_key = self:browserListCacheKey("patch")
+    local cached = self._patch_entries_cache
+    if cached and cached.key == cache_key then
+        return cached.entries
+    end
     local aggregated = {}
     local search = normalizedLower(self.browser_state.search_text)
     local search_active = search ~= ""
@@ -7036,7 +7298,9 @@ function AppStore:collectPatchEntries(repos)
             end
         end
     end
-    return self:sortPatchEntries(aggregated)
+    local sorted = self:sortPatchEntries(aggregated)
+    self._patch_entries_cache = { key = cache_key, entries = sorted }
+    return sorted
 end
 
 function AppStore:makeRepoMenuItem(repo, installed_lookup)
@@ -7088,7 +7352,18 @@ function AppStore:makePatchMenuItem(repo, patch)
     }
 end
 
+-- Reading the whole list out of the database is one operation with nobody waiting
+-- between its queries, so it holds a single connection.
 function AppStore:buildBrowserEntries()
+    if Cache.withSession then
+        return Cache.withSession(function()
+            return self:buildBrowserEntriesInSession()
+        end)
+    end
+    return self:buildBrowserEntriesInSession()
+end
+
+function AppStore:buildBrowserEntriesInSession()
     self:ensureBrowserState()
     local kind = self.browser_state.kind or "plugin"
     local items = {}
@@ -7146,6 +7421,14 @@ function AppStore:buildBrowserEntries()
         end,
     })
     items[#items].separator = true
+
+    -- Before filtering, not after. Searching the patch tab asks every repository whether
+    -- one of its patches matches, and on a cold cache each of those questions was its own
+    -- query; the aggregation below would then load the lot in one go anyway. Measured on a
+    -- Kindle 3 over 208 repositories: 698-756 ms against 123 ms once the cache is warm.
+    if kind == "patch" then
+        self:preloadPatchEntries(self:getRepoDescriptors(kind))
+    end
 
     local filtered, total = self:getFilteredDescriptors(kind)
     table.insert(items, {
@@ -8015,8 +8298,8 @@ function AppStore:showPatchRepoActionDialog(repo, entries)
     if description ~= "" then
         lines[#lines + 1] = description
     end
-    local ts = repo.data and (repo.data.pushed_at or repo.data.updated_at or repo.data.created_at)
-    if ts and ts ~= "" then
+    local ts = repoUpdatedStamp(repo)
+    if ts then
         if description ~= "" then
             lines[#lines + 1] = ""
         end
@@ -8178,6 +8461,18 @@ function AppStore:getInstalledLookup()
     return lookup
 end
 
+-- Shared by every descriptor: the cached row is reached through `_row` rather than a
+-- closure, so building the list allocates one table per repo instead of three.
+AppStore._descriptor_mt = {
+    __index = function(descriptor, key)
+        if key ~= "data" then
+            return nil
+        end
+        local row = rawget(descriptor, "_row")
+        return row and row.data or nil
+    end,
+}
+
 function AppStore:getRepoDescriptors(kind)
     -- Cache the built descriptor list in memory: rebuilding it reads the whole
     -- repo cache from disk and allocates a table per repo (hundreds of them),
@@ -8192,7 +8487,7 @@ function AppStore:getRepoDescriptors(kind)
     local descriptors = {}
     for _, repo in ipairs(entries) do
         local owner = repo.owner or (repo.data and repo.data.owner and repo.data.owner.login)
-        local descriptor = {
+        local descriptor = setmetatable({
             id = repo.repo_id,
             kind = kind,
             name = repo.name,
@@ -8202,8 +8497,14 @@ function AppStore:getRepoDescriptors(kind)
             language = repo.language,
             description = repo.description,
             homepage = repo.homepage,
-            data = repo.data,
-        }
+            pushed_at = repo.pushed_at,
+            created_at = repo.created_at,
+            topics = repo.topics,
+            fork = repo.fork,
+            -- Not copied but reached on demand, or building the list would fetch
+            -- every response.
+            _row = repo,
+        }, AppStore._descriptor_mt)
         table.insert(descriptors, descriptor)
     end
     self._repo_descriptors_cache = self._repo_descriptors_cache or {}
@@ -8644,8 +8945,8 @@ function AppStore:promptRepoAction(repo)
     if description ~= "" then
         lines[#lines + 1] = description
     end
-    local ts = repo.data and (repo.data.pushed_at or repo.data.updated_at or repo.data.created_at)
-    if ts and ts ~= "" then
+    local ts = repoUpdatedStamp(repo)
+    if ts then
         if description ~= "" then
             lines[#lines + 1] = ""
         end
@@ -9238,6 +9539,10 @@ function AppStore:refreshCache(kind)
     self.is_refreshing = true
     self.patch_cache = {}
     self._repo_descriptors_cache = nil
+    -- The stamp in their key would drop them anyway; cleared here so nothing holds a list
+    -- built from rows this refresh is about to replace.
+    self._filtered_cache = nil
+    self._patch_entries_cache = nil
     local progress = InfoMessage:new{ text = _("Refreshing AppStore cache..."), timeout = 0 }
     UIManager:show(progress)
 

@@ -7,7 +7,7 @@ local logger = require("logger")
 
 local Cache = {}
 
-local DB_SCHEMA_VERSION = 20260426
+local DB_SCHEMA_VERSION = 20260808
 local DB_DIRECTORY = ffiUtil.joinPath(DataStorage:getDataDir(), "cache/appstore")
 local DB_PATH = ffiUtil.joinPath(DB_DIRECTORY, "appstore.sqlite3")
 
@@ -24,6 +24,13 @@ local SCHEMA_STATEMENTS = {
         language TEXT,
         homepage TEXT,
         fetched_at INTEGER NOT NULL,
+        -- Ordering and search read these, so they stay out of `data`.
+        pushed_at TEXT,
+        created_at TEXT,
+        -- Space-joined: search terms are split on whitespace, so no term can straddle two topics.
+        topics TEXT,
+        -- Every rendered row asks whether it's a fork.
+        fork INTEGER NOT NULL DEFAULT 0,
         data TEXT NOT NULL,
         UNIQUE(repo_id, kind)
     );]],
@@ -46,6 +53,10 @@ local SCHEMA_STATEMENTS = {
 
 local initialized = false
 
+-- Asked on every render to validate other caches, and only ever changes when we write:
+-- opening the database to hear the same number again costs more than the number is worth.
+local last_fetched_cache = {}
+
 local function ensureDirectory()
     local ok, err = util.makePath(DB_DIRECTORY)
     if not ok then
@@ -62,8 +73,15 @@ local function openConnection()
     return conn
 end
 
+-- Held for the duration of Cache.withSession, so a long run of queries that nobody is
+-- waiting through -- a refresh, or building the whole list -- opens the database once.
+local session_conn = nil
+
 local function withConnection(fn)
     Cache.init()
+    if session_conn then
+        return fn(session_conn)
+    end
     local conn = openConnection()
     local ok, result = pcall(fn, conn)
     conn:close()
@@ -73,11 +91,45 @@ local function withConnection(fn)
     return result
 end
 
+-- Wraps an operation with no human in the middle of it. Between such operations -- while
+-- the reader is looking at a page -- the database stays closed.
+function Cache.withSession(fn)
+    if session_conn then
+        return fn()
+    end
+    Cache.init()
+    session_conn = openConnection()
+    local results = table.pack(pcall(fn))
+    -- Cleared before closing: should close() throw, a stale handle here would send every
+    -- later query through a dead connection until KOReader restarts.
+    local conn = session_conn
+    session_conn = nil
+    conn:close()
+    if not results[1] then
+        error(results[2])
+    end
+    return table.unpack(results, 2, results.n)
+end
+
 local function normalizeString(value)
     if value == nil or value == json.null then
         return ""
     end
     return tostring(value)
+end
+
+local function joinTopics(value)
+    if type(value) ~= "table" then
+        return ""
+    end
+    local parts = {}
+    for _, topic in ipairs(value) do
+        local text = normalizeString(topic)
+        if text ~= "" then
+            parts[#parts + 1] = text
+        end
+    end
+    return table.concat(parts, " ")
 end
 
 local function normalizeNumber(value)
@@ -148,6 +200,44 @@ function Cache.getPatchFilePushedAt(repo_id)
     end)
 end
 
+-- Row count and stored tree stamp for every repository at once, keyed by repo_id.
+-- The incremental refresh asks both questions about every patch repository, and asking
+-- one repository at a time reopened the database twice per repository.
+function Cache.getPatchFileSummaryByRepo()
+    return withConnection(function(conn)
+        local stmt = conn:prepare([[SELECT repo_id, COUNT(1) AS count,
+            MAX(CASE WHEN source_pushed_at IS NULL OR source_pushed_at = ''
+                THEN NULL ELSE source_pushed_at END) AS pushed_at
+            FROM patch_files GROUP BY repo_id;]])
+        local dataset = stmt:resultset("hi")
+        stmt:close()
+        local summary = {}
+        local headers = dataset and dataset[0]
+        local first_column = headers and dataset[1]
+        if type(first_column) ~= "table" then
+            return summary
+        end
+        for row_index = 1, #first_column do
+            local row = {}
+            for col_index, header in ipairs(headers) do
+                row[header] = dataset[col_index][row_index]
+            end
+            local repo_id = tonumber(row.repo_id)
+            if repo_id then
+                local pushed_at = row.pushed_at
+                if pushed_at == nil or pushed_at == "" then
+                    pushed_at = nil
+                end
+                summary[repo_id] = {
+                    count = tonumber(row.count) or 0,
+                    pushed_at = pushed_at and tostring(pushed_at) or nil,
+                }
+            end
+        end
+        return summary
+    end)
+end
+
 -- Count of rows stored for the given repo. Used by the incremental patch
 -- refresh to decide whether a "no patch files" repo needs a re-fetch even
 -- when pushed_at has not changed (i.e. we've never successfully stored any
@@ -174,7 +264,10 @@ function Cache.listPatchFiles(repo_id)
     end
     return withConnection(function(conn)
         local stmt = conn:prepare([[SELECT path, filename, branch, sha, size, download_url
-            FROM patch_files WHERE repo_id = ? ORDER BY filename COLLATE NOCASE;]])
+            FROM patch_files WHERE repo_id = ?
+            -- NOCASE keeps Aa together; the second key settles which of the two comes
+            -- first, since NOCASE alone calls them equal and leaves the order to the plan.
+            ORDER BY filename COLLATE NOCASE, filename;]])
         stmt:bind(repo_id)
         local dataset = stmt:resultset("hi")
         stmt:close()
@@ -199,6 +292,40 @@ function Cache.listPatchFiles(repo_id)
             table.insert(result, row)
         end
         return result
+    end)
+end
+
+-- Every patch file of every repository, grouped by repo_id. The browser needs them all
+-- at once -- it aggregates across the whole list -- and asking per repository meant
+-- opening the database (and its PRAGMAs) a couple of hundred times per page.
+function Cache.listPatchFilesByRepo()
+    return withConnection(function(conn)
+        local stmt = conn:prepare([[SELECT repo_id, path, filename, branch, sha, size, download_url
+            FROM patch_files ORDER BY repo_id, filename COLLATE NOCASE, filename;]])
+        local dataset = stmt:resultset("hi")
+        stmt:close()
+        local grouped = {}
+        local headers = dataset and dataset[0]
+        local first_column = headers and dataset[1]
+        if type(first_column) ~= "table" then
+            return grouped
+        end
+        for row_index = 1, #first_column do
+            local row = {}
+            for col_index, header in ipairs(headers) do
+                row[header] = dataset[col_index][row_index]
+            end
+            local repo_id = tonumber(row.repo_id)
+            if repo_id then
+                local bucket = grouped[repo_id]
+                if not bucket then
+                    bucket = {}
+                    grouped[repo_id] = bucket
+                end
+                bucket[#bucket + 1] = row
+            end
+        end
+        return grouped
     end)
 end
 
@@ -309,8 +436,8 @@ function Cache.storeRepos(kind, repos)
         delete_stmt:step()
         delete_stmt:close()
 
-        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
+        local insert_sql = [[INSERT INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, fork, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
         local stmt = conn:prepare(insert_sql)
         for _, repo in ipairs(repos) do
             local owner_login = getOwnerLogin(repo.owner)
@@ -332,6 +459,10 @@ function Cache.storeRepos(kind, repos)
                 normalizeString(repo.language),
                 normalizeString(repo.homepage),
                 fetched_at,
+                normalizeString(repo.pushed_at),
+                normalizeString(repo.created_at),
+                joinTopics(repo.topics),
+                repo.fork == true and 1 or 0,
                 encoded
             )
             stmt:step()
@@ -340,19 +471,63 @@ function Cache.storeRepos(kind, repos)
         stmt:close()
         conn:exec("COMMIT;")
     end)
+    -- Only once the rows are in: an empty refresh must keep reading as empty.
+    -- `false` rather than `nil`: nil means "not asked yet" and sends every render
+    -- back to the database.
+    last_fetched_cache[kind] = #repos > 0 and fetched_at or false
 end
 
-local function decodeRow(row)
-    local decoded
-    if row.data and row.data ~= "" then
-        local ok, parsed = pcall(json.decode, row.data)
-        if ok then
-            decoded = parsed
-        else
-            logger.warn("appstore cache decode error", parsed)
-        end
+local function decodeData(raw, context)
+    if not raw or raw == "" then
+        return nil
     end
-    return {
+    local ok, parsed = pcall(json.decode, raw)
+    if ok then
+        return parsed
+    end
+    logger.warn("appstore cache decode error", context, parsed)
+    return nil
+end
+
+-- The API response of one repo, fetched and decoded on first use: the listing selects
+-- everything but this column, and a page only ever shows a handful of entries.
+local function loadDataFor(repo_id, kind)
+    if not repo_id then
+        return nil
+    end
+    local raw = withConnection(function(conn)
+        local stmt = conn:prepare([[SELECT data FROM repos WHERE repo_id = ? AND kind = ?;]])
+        stmt:bind(repo_id, kind)
+        local row = stmt:step()
+        local value = row and row[1] or nil
+        stmt:close()
+        return value
+    end)
+    return decodeData(raw, repo_id)
+end
+
+local lazy_data_mt = {
+    __index = function(entry, key)
+        if key ~= "data" then
+            return nil
+        end
+        -- A repo with no stored response must not be looked up again, but `data` still has
+        -- to read as nil: callers test it, and some of them will use `~= nil`.
+        if rawget(entry, "_no_data") then
+            return nil
+        end
+        local loaded = loadDataFor(rawget(entry, "repo_id"), rawget(entry, "kind"))
+        if loaded == nil then
+            rawset(entry, "_no_data", true)
+            return nil
+        end
+        rawset(entry, "data", loaded)
+        return loaded
+    end,
+}
+
+local function makeRow(row)
+    return setmetatable({
         repo_id = tonumber(row.repo_id),
         kind = row.kind,
         name = row.name,
@@ -363,14 +538,17 @@ local function decodeRow(row)
         language = row.language,
         homepage = row.homepage,
         fetched_at = tonumber(row.fetched_at) or 0,
-        data = decoded,
-    }
+        pushed_at = row.pushed_at,
+        created_at = row.created_at,
+        topics = row.topics,
+        fork = tonumber(row.fork) == 1,
+    }, lazy_data_mt)
 end
 
 local function fetchRows(kind)
     return withConnection(function(conn)
-        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, data
-            FROM repos WHERE kind = ? ORDER BY stars DESC, name COLLATE NOCASE;]])
+        local stmt = conn:prepare([[SELECT repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, fork
+            FROM repos WHERE kind = ? ORDER BY stars DESC, name COLLATE NOCASE, name;]])
         stmt:bind(kind)
         local dataset = stmt:resultset("hi")
         stmt:close()
@@ -402,24 +580,33 @@ function Cache.listRepos(kind)
         for col_index, header in ipairs(headers) do
             row[header] = dataset[col_index][row_index]
         end
-        table.insert(result, decodeRow(row))
+        table.insert(result, makeRow(row))
     end
     return result
 end
 
 function Cache.getLastFetched(kind)
     kind = kind or "plugin"
-    return withConnection(function(conn)
-        local stmt = conn:prepare([[SELECT MAX(fetched_at) FROM repos WHERE kind = ?;]])
+    local cached = last_fetched_cache[kind]
+    if cached ~= nil then
+        return cached or nil
+    end
+    local value = withConnection(function(conn)
+        -- storeRepos stamps every row of a kind with the same time in one transaction,
+        -- so any row answers this; the kind index finds one without a scan.
+        local stmt = conn:prepare([[SELECT fetched_at FROM repos WHERE kind = ? LIMIT 1;]])
         stmt:bind(kind)
         local row = stmt:step()
-        local value = row and row[1] or nil
+        local result = row and row[1] or nil
         stmt:close()
-        return tonumber(value)
+        return tonumber(result)
     end)
+    last_fetched_cache[kind] = value or false
+    return value
 end
 
 function Cache.clear()
+    last_fetched_cache = {}
     withConnection(function(conn)
         conn:exec("DELETE FROM repos;")
     end)
