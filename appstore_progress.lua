@@ -113,10 +113,6 @@ function AppStoreProgress:show()
     UIManager:forceRePaint()
 end
 
-function AppStoreProgress:close()
-    UIManager:close(self, "ui")
-end
-
 --- Report progress. `fraction` is 0..1; values outside are clamped.
 function AppStoreProgress:setFraction(fraction)
     fraction = tonumber(fraction) or 0
@@ -188,11 +184,9 @@ AppStoreProgress.onClose = function(self)
     self:cancel()
     return true
 end
-AppStoreProgress.onTapClose = function(self, _arg, ges)
-    -- Inside the frame only; TitleBar's own cross has its own callback.
-    if ges and self.frame and self.frame.dimen and not self.frame.dimen:contains(ges.pos) then
-        return false
-    end
+-- Only taps inside the frame arrive here, the GestureRange sees to that, and they are
+-- swallowed: the cross in the title bar carries its own callback.
+AppStoreProgress.onTapClose = function()
     return true
 end
 

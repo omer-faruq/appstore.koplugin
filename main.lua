@@ -9697,6 +9697,10 @@ function AppStore:refreshCache(kind)
     -- "all" branch here that nothing reached, and its two phases would have claimed the
     -- same stretch of the progress bar.
     kind = kind or (self.browser_state and self.browser_state.kind) or "plugin"
+    if kind ~= "plugin" and kind ~= "patch" then
+        logger.warn("appstore: refresh asked for an unknown kind:", kind)
+        return
+    end
     local refresh_patches = kind == "patch"
     local refresh_plugins = not refresh_patches
 
