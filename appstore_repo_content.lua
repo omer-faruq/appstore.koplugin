@@ -35,16 +35,17 @@ local function download(url)
     local response = {}
     -- This runs on the UI thread: a connection that never answers would otherwise hold the
     -- interface until KOReader is restarted.
-    local code = Net.requestToTable({
+    local code, _, status = Net.requestToTable({
         url = url,
         headers = {
             ["Accept"] = "text/plain",
             ["User-Agent"] = "KOReader-AppStore",
         },
     }, response)
-    -- A timeout arrives as a string in place of a status; keep it, so the caller's
-    -- "not 200" check still fires and the reason reaches the log.
-    return tonumber(code) or code or "request failed", table.concat(response)
+    -- A timeout arrives as a string in place of a status, a throw leaves the reason in
+    -- `status`; keep either, so the caller's "not 200" check still fires and the reason
+    -- reaches the log.
+    return tonumber(code) or code or status, table.concat(response)
 end
 
 -- Download and clean the raw README body, shared by the cached and

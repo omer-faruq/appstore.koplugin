@@ -9,12 +9,13 @@ The sink is built here rather than by the caller because socketutil's sinks read
 when they are created, which has to be after `set_timeout`.
 
     local body_parts = {}
-    local code = Net.requestToTable(request, body_parts)
+    local code, _, status = Net.requestToTable(request, body_parts)
     local code, headers, status = Net.requestToFile(request, file, socketutil.FILE_BLOCK_TIMEOUT,
         socketutil.FILE_TOTAL_TIMEOUT)
 
-`code` is nil only when the request threw -- a timeout arrives as a string in its place, which
-callers pass on so the reason reaches their log instead of turning into a bare nil.
+`code` is nil only when the request threw, and the error message takes the place of the status
+line. A timeout arrives as a string where `code` would be. Callers pass either on, so the
+reason reaches their log instead of turning into a bare nil.
 ]]
 
 local http = require("socket.http")
@@ -31,7 +32,8 @@ local function perform(request, make_sink, block_timeout, total_timeout)
     socketutil:reset_timeout()
     if not ok then
         logger.warn("appstore: request failed:", request.url, result)
-        return nil, nil, nil, result
+        -- The reason goes where a status line would: callers already read it.
+        return nil, nil, result
     end
     return code, headers, status
 end

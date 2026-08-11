@@ -55,12 +55,12 @@ local function request(path, query)
     -- Without a deadline a single stalled connection hangs the interface for good: every
     -- one of these runs on the UI thread. The API answers in well under a second when it
     -- answers at all, so the large-content values are already generous.
-    local code = Net.requestToTable({
+    local code, _, status = Net.requestToTable({
         url = target,
         headers = headers,
     }, response_body)
     if not code then
-        return "request failed", ""
+        return status, ""
     end
     local body = table.concat(response_body)
     -- A timeout reports itself as a string where a status would be. Callers only ever

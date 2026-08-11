@@ -2331,14 +2331,14 @@ function AppStore:checkAllUpdates()
             local response = {}
             -- Off the UI thread here, but a subprocess that never returns still leaves the
             -- check hanging and its zombie behind.
-            local code = Net.requestToTable({
+            local code, _, status = Net.requestToTable({
                 url = url,
                 headers = {
                     ["User-Agent"] = "KOReader-AppStore",
                     ["Accept"] = "text/plain",
                 },
             }, response)
-            code = tonumber(code) or code or "request failed"
+            code = tonumber(code) or code or status
             if code ~= 200 then
                 return nil, string.format("HTTP %s", tostring(code))
             end
@@ -4202,7 +4202,7 @@ fetchGitHubRaw = function(owner, repo_name, branch, path)
     local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path)
     local response = {}
     -- On the UI thread: a stalled connection would hold the whole interface.
-    local code = Net.requestToTable({
+    local code, _, status = Net.requestToTable({
         url = url,
         headers = {
             ["User-Agent"] = "KOReader-AppStore",
@@ -4210,7 +4210,8 @@ fetchGitHubRaw = function(owner, repo_name, branch, path)
         },
     }, response)
     -- Timeouts report a string here, and tonumber would flatten every one of them to nil.
-    code = tonumber(code) or code or "request failed"
+    -- A throw leaves nothing here at all, and its reason in `status`.
+    code = tonumber(code) or code or status
     if code ~= 200 then
         return nil, string.format("HTTP %s", tostring(code))
     end
