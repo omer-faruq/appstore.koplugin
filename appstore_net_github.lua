@@ -1,6 +1,5 @@
-﻿local http = require("socket.http")
-local json = require("json")
-local socketutil = require("socketutil")
+﻿local json = require("json")
+local Net = require("appstore_net")
 local url = require("socket.url")
 local logger = require("logger")
 
@@ -56,17 +55,13 @@ local function request(path, query)
     -- Without a deadline a single stalled connection hangs the interface for good: every
     -- one of these runs on the UI thread. The API answers in well under a second when it
     -- answers at all, so the large-content values are already generous.
-    --
-    -- socketutil's own sink is what enforces the *total* timeout: the socket-level one is
-    -- restarted on every receive, so a connection that dribbles a byte at a time would
-    -- otherwise outlast it. Built after set_timeout, which is where it reads the deadline.
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    local _, code = http.request{
+    local code = Net.requestToTable({
         url = target,
         headers = headers,
-        sink = socketutil.table_sink(response_body),
-    }
-    socketutil:reset_timeout()
+    }, response_body)
+    if not code then
+        return "request failed", ""
+    end
     local body = table.concat(response_body)
     -- A timeout reports itself as a string where a status would be. Callers only ever
     -- compare against 200, so passing it through keeps them working and names the reason

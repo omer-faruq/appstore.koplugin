@@ -44,8 +44,7 @@ local InstallStore = require("appstore_installs")
 local util = require("util")
 local NetworkMgr = require("ui/network/manager")
 local socketutil = require("socketutil")
-local socket = require("socket")
-local http = require("socket.http")
+local Net = require("appstore_net")
 local Archiver = require("ffi/archiver")
 local sha2 = require("ffi/sha2")
 local lfs = require("libs/libkoreader-lfs")
@@ -2303,7 +2302,6 @@ function AppStore:checkAllUpdates()
     end
     NetworkMgr:runWhenOnline(function()
         local Trapper = require("ui/trapper")
-        local http = require("socket.http")
         local GitHub = require("appstore_net_github")
 
         local function parseGitHubTimestampWorker(ts)
@@ -2332,19 +2330,15 @@ function AppStore:checkAllUpdates()
             local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path)
             local response = {}
             -- Off the UI thread here, but a subprocess that never returns still leaves the
-            -- check hanging and its zombie behind. socketutil's sink is what enforces the
-            -- total timeout -- the socket-level one restarts on every receive.
-            socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-            local _, code = http.request{
+            -- check hanging and its zombie behind.
+            local code = Net.requestToTable({
                 url = url,
-                sink = socketutil.table_sink(response),
                 headers = {
                     ["User-Agent"] = "KOReader-AppStore",
                     ["Accept"] = "text/plain",
                 },
-            }
-            socketutil:reset_timeout()
-            code = tonumber(code) or code
+            }, response)
+            code = tonumber(code) or code or "request failed"
             if code ~= 200 then
                 return nil, string.format("HTTP %s", tostring(code))
             end
@@ -4207,21 +4201,16 @@ fetchGitHubRaw = function(owner, repo_name, branch, path)
     branch = branch or "HEAD"
     local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path)
     local response = {}
-    -- On the UI thread: a stalled connection would hold the whole interface. socketutil's
-    -- sink is what enforces the total timeout -- the socket-level one restarts on every
-    -- receive, so a connection dribbling a byte at a time would outlast it.
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    local _, code = http.request{
+    -- On the UI thread: a stalled connection would hold the whole interface.
+    local code = Net.requestToTable({
         url = url,
-        sink = socketutil.table_sink(response),
         headers = {
             ["User-Agent"] = "KOReader-AppStore",
             ["Accept"] = "text/plain",
         },
-    }
-    socketutil:reset_timeout()
+    }, response)
     -- Timeouts report a string here, and tonumber would flatten every one of them to nil.
-    code = tonumber(code) or code
+    code = tonumber(code) or code or "request failed"
     if code ~= 200 then
         return nil, string.format("HTTP %s", tostring(code))
     end
@@ -8599,19 +8588,15 @@ downloadToFile = function(url, local_path)
         return false, err or "failed to open file for writing"
     end
 
-    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-    local request = {
+    local code, headers, status = Net.requestToFile({
         url = url,
         method = "GET",
-        sink = socketutil.file_sink(file),
         redirect = true,
         headers = {
             ["User-Agent"] = socketutil.USER_AGENT,
             ["Accept"] = "application/zip, application/octet-stream",
         },
-    }
-    local code, headers, status = socket.skip(1, http.request(request))
-    socketutil:reset_timeout()
+    }, file, socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
 
     if code == socketutil.TIMEOUT_CODE
         or code == socketutil.SSL_HANDSHAKE_CODE

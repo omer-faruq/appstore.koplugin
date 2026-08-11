@@ -461,6 +461,10 @@ function Cache.storeRepos(kind, repos, on_progress, should_stop)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
         local stmt = conn:prepare(insert_sql)
         for index, repo in ipairs(repos) do
+            -- on_progress hands control back to UIManager for a moment, and that moment is
+            -- inside this transaction: anything that queried the cache from there would join
+            -- it, and roll back with it. Nothing does today -- the only work scheduled into
+            -- that window is a repaint and a read of the input queue.
             if on_progress then
                 on_progress(index, total)
             end
