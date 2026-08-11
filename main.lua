@@ -8606,6 +8606,8 @@ downloadToFile = function(url, local_path)
     end
 
     if not headers then
+        -- A request that threw left the sink unfinished, so the file is still open.
+        pcall(file.close, file)
         util.removeFile(local_path)
         return false, status or code or "network error"
     end
