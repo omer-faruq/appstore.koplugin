@@ -10,7 +10,7 @@ Back key at all.
     local progress = AppStoreProgress:new{ title = _("Refreshing plugins…") }
     progress:show()
     progress:setFraction(0.25)        -- 0..1; redraws at most every `redraw_interval`
-    progress:close()
+    UIManager:close(progress)
 
 `cancel_callback` fires only when the user stops it, not when we close it ourselves.
 ]]
