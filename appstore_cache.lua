@@ -406,9 +406,11 @@ function Cache.init()
     local conn = openConnection()
     local current_version = tonumber(conn:rowexec("PRAGMA user_version;")) or 0
     if current_version < DB_SCHEMA_VERSION then
-        conn:exec("PRAGMA writable_schema = ON;")
-        conn:exec("DELETE FROM sqlite_master WHERE type IN ('table','index','trigger');")
-        conn:exec("PRAGMA writable_schema = OFF;")
+        -- The schema is just these two tables (their indexes drop with them),
+        -- so DROP TABLE IF EXISTS is equivalent to the old sqlite_master wipe
+        -- and doesn't require prying open writable_schema to do it.
+        conn:exec("DROP TABLE IF EXISTS repos;")
+        conn:exec("DROP TABLE IF EXISTS patch_files;")
         conn:exec("VACUUM;")
         conn:exec("PRAGMA user_version = " .. DB_SCHEMA_VERSION .. ";")
     end

@@ -1,6 +1,7 @@
 ﻿local http = require("socket.http")
 local json = require("json")
 local url = require("socket.url")
+local socketutil = require("socketutil")
 local logger = require("logger")
 
 local ok_cfg, AppStoreConfig = pcall(require, "appstore_configuration")
@@ -20,13 +21,14 @@ local function joinQueryParts(parts)
     return table.concat(parts, " ")
 end
 
+-- socketutil.table_sink, not a hand-rolled sink: luasocket's total timeout is
+-- reset between polls, so it is only actually enforced by socketutil's sinks.
+-- Without this the LARGE_TOTAL_TIMEOUT set below would not bound anything and
+-- a trickling response could still hang the UI thread indefinitely.
+-- It reads socketutil.total_timeout when constructed, so set_timeout must run
+-- before the request table is built -- it does.
 local function newTableSink(target)
-    return function(chunk, err)
-        if chunk then
-            target[#target + 1] = chunk
-        end
-        return 1, err
-    end
+    return socketutil.table_sink(target)
 end
 
 local function getAuthHeaders()
@@ -44,8 +46,92 @@ local function getAuthHeaders()
     }
 end
 
+-- Hosts this client is willing to talk to. A redirect leaving this set is
+-- refused rather than followed.
+local ALLOWED_HOSTS = {
+    ["api.github.com"] = true,
+    ["github.com"] = true,
+    ["codeload.github.com"] = true,
+    ["objects.githubusercontent.com"] = true,
+    ["raw.githubusercontent.com"] = true,
+    ["release-assets.githubusercontent.com"] = true,
+}
+
+local MAX_REDIRECTS = 5
+
+-- Follow redirects manually instead of letting luasocket do it.
+--
+-- luasocket's default is redirect = true, and its tredirect() copies reqt.headers
+-- verbatim into the follow-up request -- to any host, over any scheme. Since
+-- these requests carry the user's GitHub PAT in an Authorization header, a 30x
+-- pointing elsewhere would hand the token to that host, in cleartext if the
+-- Location is http://. Driving redirects here lets us (a) refuse non-https,
+-- (b) refuse unexpected hosts, and (c) re-attach Authorization only while the
+-- target is still api.github.com.
+--
+-- Timeouts are set per attempt: without them a stalled socket hangs the UI
+-- thread with no way out, which is exactly what happens on flaky device wifi.
+local function requestWithGuardedRedirects(target, headers)
+    local current = target
+    for _ = 0, MAX_REDIRECTS do
+        local parsed = url.parse(current)
+        if not parsed then
+            return 0, "unparseable URL"
+        end
+        local host = (parsed.host or ""):lower()
+        -- url.parse does not normalise the scheme; "HTTPS://" is legal.
+        if (parsed.scheme or ""):lower() ~= "https" then
+            logger.warn("AppStore: refusing non-https URL", current)
+            return 0, "refusing non-https URL"
+        end
+        if not ALLOWED_HOSTS[host] then
+            logger.warn("AppStore: refusing unexpected host", host)
+            return 0, "refusing unexpected host: " .. host
+        end
+
+        local send_headers = {}
+        for k, v in pairs(headers) do
+            send_headers[k] = v
+        end
+        if host ~= "api.github.com" then
+            send_headers["Authorization"] = nil
+        end
+
+        local response_body = {}
+        -- LARGE_*, not DEFAULT_*: socketutil.DEFAULT_TOTAL_TIMEOUT is -1, i.e.
+        -- "no total timeout" (it is the value reset_timeout restores), so using
+        -- it here would leave the hang this is meant to prevent.
+        socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+        local _, code, resp_headers = http.request{
+            url = current,
+            headers = send_headers,
+            sink = newTableSink(response_body),
+            redirect = false,
+        }
+        socketutil:reset_timeout()
+
+        code = tonumber(code)
+        if code == 301 or code == 302 or code == 303 or code == 307 or code == 308 then
+            local location = resp_headers and (resp_headers.location or resp_headers.Location)
+            if not location or location == "" then
+                return code, table.concat(response_body)
+            end
+            current = url.absolute(current, location)
+        else
+            return code or 0, table.concat(response_body)
+        end
+    end
+    logger.warn("AppStore: too many redirects for", target)
+    return 0, "too many redirects"
+end
+
+local NetworkMgr = require("ui/network/manager")
+
 local function request(path, query)
-    local response_body = {}
+    if NetworkMgr and NetworkMgr.isOnline and not NetworkMgr:isOnline() then
+        logger.dbg("AppStore HTTP offline check failed", path)
+        return 0, "offline"
+    end
     local target = BASE_URL .. path
     if query and query ~= "" then
         target = target .. "?" .. query
@@ -61,13 +147,7 @@ local function request(path, query)
             headers[key] = value
         end
     end
-    local _, code = http.request{
-        url = target,
-        headers = headers,
-        sink = newTableSink(response_body),
-    }
-    local body = table.concat(response_body)
-    return tonumber(code), body
+    return requestWithGuardedRedirects(target, headers)
 end
 
 local function buildQuery(opts)

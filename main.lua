@@ -8737,70 +8737,160 @@ extractPluginToUserDir = function(reader, info, dest_root)
     util.makePath(dest_root)
     local target_dir = dest_root .. "/" .. info.plugin_dirname
 
-    -- Collect the set of relative paths coming from the archive so we can
-    -- remove only those files before extraction.  Files that exist locally
-    -- but are NOT in the archive (e.g. user-created configuration files)
-    -- are left untouched.
+    -- Scoped here rather than as a chunk-level local: main.lua's chunk is
+    -- already at LuaJIT's 200 local variable ceiling (see the note on
+    -- resolveNewInstallDestination above). require() is cached, so this
+    -- costs nothing on repeat calls.
+    local ffiUtil = require("ffi/util")
+
+    local function canonicalizePath(path)
+        if not path then return "" end
+        path = path:gsub("\\", "/")
+        local parts = {}
+        for part in path:gmatch("[^/]+") do
+            if part == ".." then
+                if #parts > 0 and parts[#parts] ~= ".." then
+                    table.remove(parts)
+                else
+                    table.insert(parts, "..")
+                end
+            elseif part ~= "." and part ~= "" then
+                table.insert(parts, part)
+            end
+        end
+        local prefix = path:sub(1, 1) == "/" and "/" or ""
+        return prefix .. table.concat(parts, "/")
+    end
+
+    local function isSubPath(parent, child)
+        local norm_parent = canonicalizePath(parent)
+        local norm_child = canonicalizePath(child)
+        if norm_parent == norm_child then
+            return true
+        end
+        if not norm_parent:find("/$") then
+            norm_parent = norm_parent .. "/"
+        end
+        return norm_child:sub(1, #norm_parent) == norm_parent
+    end
+
+    local canonical_target = canonicalizePath(target_dir)
+
+    -- Collect the set of relative paths coming from the archive, validating
+    -- that each one resolves inside target_dir. A crafted entry.path such as
+    -- "../../etc/foo" would otherwise let a malicious archive write outside
+    -- the plugin directory (Zip Slip).
+    local planned = {}
     local archive_relatives = {}
     for entry in reader:iterate() do
         if entry.mode == "file" then
+            local relative
             if info.plugin_root == "" then
-                archive_relatives[entry.path] = true
+                relative = entry.path
             elseif entry.path:sub(1, #info.plugin_root + 1) == info.plugin_root .. "/" then
-                archive_relatives[entry.path:sub(#info.plugin_root + 2)] = true
+                relative = entry.path:sub(#info.plugin_root + 2)
+            end
+            if relative then
+                if not isSubPath(canonical_target, target_dir .. "/" .. relative) then
+                    return false, _("Security error: Archive entry escapes target directory: ") .. entry.path
+                end
+                planned[#planned + 1] = { path = entry.path, relative = relative }
+                archive_relatives[relative] = true
             end
         end
     end
 
-    -- Remove only the files that the archive will replace so stale code
-    -- from a previous version does not linger.
+    if #planned == 0 then
+        return false, _("Archive contains no installable files.")
+    end
+
+    -- Extract into a staging directory and swap it into place atomically
+    -- instead of overwriting target_dir in place: a failure partway through
+    -- direct extraction used to leave a half-old, half-new plugin directory.
+    local staging_dir = target_dir .. ".new"
+    local backup_dir = target_dir .. ".bak"
+
+    local function purge(path)
+        if lfs.attributes(path, "mode") == "directory" then
+            pcall(ffiUtil.purgeDir, path)
+        end
+    end
+
+    purge(staging_dir)
+    util.makePath(staging_dir)
+
+    for _, item in ipairs(planned) do
+        local dest_path = staging_dir .. "/" .. item.relative
+        local parent = dest_path:match("^(.*)/")
+        if parent and parent ~= "" then
+            util.makePath(parent)
+        end
+        if not reader:extractToPath(item.path, dest_path) then
+            purge(staging_dir)
+            return false, _("Failed to extract file: ") .. item.path
+        end
+    end
+
+    -- Carry over files that exist locally but are NOT in the archive (e.g.
+    -- user-created configuration files) so a partial-content release doesn't
+    -- drop them.
     if lfs.attributes(target_dir, "mode") == "directory" then
-        local function remove_archive_files(dir, prefix)
+        local carry_err
+        local function carryOver(dir, prefix)
             for f in lfs.dir(dir) do
+                if carry_err then
+                    return
+                end
                 if f ~= "." and f ~= ".." then
                     local rel = (prefix == "") and f or (prefix .. "/" .. f)
                     local full = dir .. "/" .. f
                     local mode = lfs.attributes(full, "mode")
                     if mode == "directory" then
-                        remove_archive_files(full, rel)
-                    elseif mode == "file" and archive_relatives[rel] then
-                        os.remove(full)
+                        carryOver(full, rel)
+                    elseif mode == "file" and not archive_relatives[rel] then
+                        local dest = staging_dir .. "/" .. rel
+                        local parent = dest:match("^(.*)/")
+                        if parent and parent ~= "" then
+                            util.makePath(parent)
+                        end
+                        local copy_err = ffiUtil.copyFile(full, dest)
+                        if copy_err then
+                            carry_err = tostring(copy_err) .. " (" .. rel .. ")"
+                        end
                     end
                 end
             end
         end
-        remove_archive_files(target_dir, "")
-    end
-
-    for entry in reader:iterate() do
-        if entry.mode == "file" then
-            if info.plugin_root == "" then
-                -- Rootless archive: copy every file.
-                local relative = entry.path
-                local dest_path = target_dir .. "/" .. relative
-                local parent = dest_path:match("^(.*)/")
-                if parent and parent ~= "" then
-                    util.makePath(parent)
-                end
-                local ok = reader:extractToPath(entry.path, dest_path)
-                if not ok then
-                    return false, _("Failed to extract file: ") .. entry.path
-                end
-            elseif entry.path:sub(1, #info.plugin_root + 1) == info.plugin_root .. "/" then
-                local relative = entry.path:sub(#info.plugin_root + 2)
-                local dest_path = target_dir .. "/" .. relative
-                local parent = dest_path:match("^(.*)/")
-                if parent and parent ~= "" then
-                    util.makePath(parent)
-                end
-                local ok = reader:extractToPath(entry.path, dest_path)
-                if not ok then
-                    return false, _("Failed to extract file: ") .. entry.path
-                end
-            end
+        carryOver(target_dir, "")
+        if carry_err then
+            purge(staging_dir)
+            return false, _("Failed to preserve existing plugin files: ") .. carry_err
         end
     end
 
+    local had_existing = lfs.attributes(target_dir, "mode") == "directory"
+    if had_existing then
+        purge(backup_dir)
+        local ok_bak, bak_err = os.rename(target_dir, backup_dir)
+        if not ok_bak then
+            purge(staging_dir)
+            return false, _("Failed to install: ") .. tostring(bak_err)
+        end
+    end
+
+    local ok_swap, swap_err = os.rename(staging_dir, target_dir)
+    if not ok_swap then
+        if had_existing then
+            local restored = os.rename(backup_dir, target_dir)
+            if not restored then
+                logger.err("AppStore: could not restore", target_dir, "-- the previous version is left at", backup_dir)
+            end
+        end
+        purge(staging_dir)
+        return false, _("Failed to install: ") .. tostring(swap_err)
+    end
+
+    purge(backup_dir)
     return true, target_dir
 end
 

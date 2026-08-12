@@ -32,7 +32,10 @@ end
 
 local function loadLangTable(lang)
     -- "C" / nil / any en_* locale means "no translation, use source strings".
-    if not lang or lang == "" or lang == "C" or lang:match("^en") then
+    if not lang or type(lang) ~= "string" or lang == "" or lang == "C" or lang:match("^en") then
+        return nil
+    end
+    if not lang:match("^[a-zA-Z0-9_-]+$") then
         return nil
     end
     local dir = thisDir()
@@ -41,10 +44,16 @@ local function loadLangTable(lang)
     end
 
     local function tryCode(code)
+        if not code or not code:match("^[a-zA-Z0-9_-]+$") then
+            return nil
+        end
         local path = dir .. "/l10n/" .. code .. ".lua"
         local chunk = loadfile(path)
         if not chunk then
             return nil
+        end
+        if setfenv then
+            setfenv(chunk, {})
         end
         local ok, tbl = pcall(chunk)
         if ok and type(tbl) == "table" then
