@@ -31,6 +31,10 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
 
+-- Not modal, on purpose. Input does not leak either way -- UIManager:sendEvent hands the event
+-- to the topmost non-toast widget, whatever its modal flag -- so the only difference is the
+-- stacking order against other modals, and during a refresh that runs for a minute the dialogs
+-- liable to appear over it, network or battery, are ones the reader wants on top.
 local AppStoreProgress = InputContainer:extend{
     title = nil,
     cancel_callback = nil,
