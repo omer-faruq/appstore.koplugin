@@ -2338,9 +2338,12 @@ function AppStore:checkAllUpdates()
                     ["Accept"] = "text/plain",
                 },
             }, response)
-            code = tonumber(code) or code or status
-            if code ~= 200 then
-                return nil, string.format("HTTP %s", tostring(code))
+            -- Same rule as fetchGitHubRaw: a throw has no code, and its reason is not HTTP.
+            if tonumber(code) ~= 200 then
+                if code then
+                    return nil, string.format("HTTP %s", tostring(code))
+                end
+                return nil, tostring(status or "network error")
             end
             return table.concat(response)
         end
@@ -4209,11 +4212,15 @@ fetchGitHubRaw = function(owner, repo_name, branch, path)
             ["Accept"] = "text/plain",
         },
     }, response)
-    -- Timeouts report a string here, and tonumber would flatten every one of them to nil.
-    -- A throw leaves nothing here at all, and its reason in `status`.
-    code = tonumber(code) or code or status
-    if code ~= 200 then
-        return nil, string.format("HTTP %s", tostring(code))
+    -- Timeouts report a string where the code goes, and tonumber would flatten every one of
+    -- them to nil. A throw leaves nothing there at all and its reason in `status`: that reason
+    -- is worth keeping -- it is the only clue to a failure we have not seen before -- but it is
+    -- not an HTTP outcome, and the prefix would name a status that never arrived.
+    if tonumber(code) ~= 200 then
+        if code then
+            return nil, string.format("HTTP %s", tostring(code))
+        end
+        return nil, tostring(status or "network error")
     end
     return table.concat(response)
 end
