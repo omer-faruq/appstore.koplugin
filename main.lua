@@ -8599,6 +8599,12 @@ downloadToFile = function(url, local_path)
         },
     }, file, socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
 
+    -- socketutil.file_sink closes the handle at end of stream and on its own timeout, and
+    -- nowhere else: a read timeout mid-transfer, a handshake failure, or a throw all leave it
+    -- open. Closing here covers every exit; where the sink got there first, the second close
+    -- raises and the pcall absorbs it.
+    pcall(file.close, file)
+
     if code == socketutil.TIMEOUT_CODE
         or code == socketutil.SSL_HANDSHAKE_CODE
         or code == socketutil.SINK_TIMEOUT_CODE then
@@ -8607,8 +8613,6 @@ downloadToFile = function(url, local_path)
     end
 
     if not headers then
-        -- A request that threw left the sink unfinished, so the file is still open.
-        pcall(file.close, file)
         util.removeFile(local_path)
         return false, status or code or "network error"
     end
