@@ -42,10 +42,9 @@ local function download(url)
             ["User-Agent"] = "KOReader-AppStore",
         },
     }, response)
-    -- A timeout arrives as a string in place of a status, a throw leaves the reason in
-    -- `status`; keep either, so the caller's "not 200" check still fires and the reason
-    -- reaches the log.
-    return tonumber(code) or code or status, table.concat(response)
+    -- A timeout arrives as a string in place of a status; a throw leaves nothing there at
+    -- all and its reason in `status`. Kept apart, so the caller can tell one from the other.
+    return code, status, table.concat(response)
 end
 
 -- Download and clean the raw README body, shared by the cached and
@@ -55,9 +54,13 @@ local function downloadReadmeBody(owner, repo)
         return nil, "missing owner/repo"
     end
     local url = buildRawUrl(owner, repo)
-    local code, body = download(url)
-    if code ~= 200 then
-        return nil, string.format("HTTP %s", tostring(code))
+    local code, status, body = download(url)
+    -- Same rule as fetchGitHubRaw: a throw has no code, and its reason is not HTTP.
+    if tonumber(code) ~= 200 then
+        if code then
+            return nil, string.format("HTTP %s", tostring(code))
+        end
+        return nil, tostring(status or "network error")
     end
     if not body or body == "" then
         return nil, "empty body"
