@@ -217,8 +217,9 @@ You can also browse the repository list from your PC browser by visiting [https:
 
 The plugin UI can be shown in the language selected in KOReader (**Settings → Language**).
 Bundled translations: Simplified Chinese (`zh_CN`), Turkish (`tr`), Spanish (`es`),
-French (`fr`), German (`de`), Brazilian Portuguese (`pt_BR`). Any untranslated string
-falls back to English, and an unsupported language shows the full English UI.
+French (`fr`), German (`de`), Brazilian Portuguese (`pt_BR`), Hungarian (`hu`). Any
+untranslated string falls back to English, and an unsupported language shows the full
+English UI.
 
 Translations live in `l10n/<code>.lua`, plain Lua tables mapping the English source
 string to its translation. The plugin loads them through `appstore_gettext.lua`, a
