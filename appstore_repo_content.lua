@@ -3,8 +3,7 @@ local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local FileManager = require("apps/filemanager/filemanager")
 local _ = require("appstore_gettext")
-local http = require("socket.http")
-local ltn12 = require("ltn12")
+local Net = require("appstore_net")
 local util = require("util")
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
@@ -34,15 +33,18 @@ end
 
 local function download(url)
     local response = {}
-    local _, code = http.request{
+    -- This runs on the UI thread: a connection that never answers would otherwise hold the
+    -- interface until KOReader is restarted.
+    local code, _, status = Net.requestToTable({
         url = url,
-        sink = ltn12.sink.table(response),
         headers = {
             ["Accept"] = "text/plain",
             ["User-Agent"] = "KOReader-AppStore",
         },
-    }
-    return tonumber(code), table.concat(response)
+    }, response)
+    -- A timeout arrives as a string in place of a status; a throw leaves nothing there at
+    -- all and its reason in `status`. Kept apart, so the caller can tell one from the other.
+    return code, status, table.concat(response)
 end
 
 -- Download and clean the raw README body, shared by the cached and
@@ -52,9 +54,13 @@ local function downloadReadmeBody(owner, repo)
         return nil, "missing owner/repo"
     end
     local url = buildRawUrl(owner, repo)
-    local code, body = download(url)
-    if code ~= 200 then
-        return nil, string.format("HTTP %s", tostring(code))
+    local code, status, body = download(url)
+    -- Same rule as fetchGitHubRaw: a throw has no code, and its reason is not HTTP.
+    if tonumber(code) ~= 200 then
+        if code then
+            return nil, string.format("HTTP %s", tostring(code))
+        end
+        return nil, tostring(status or "network error")
     end
     if not body or body == "" then
         return nil, "empty body"

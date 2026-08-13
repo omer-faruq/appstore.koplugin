@@ -1,5 +1,5 @@
-﻿local http = require("socket.http")
-local json = require("json")
+﻿local json = require("json")
+local Net = require("appstore_net")
 local url = require("socket.url")
 local logger = require("logger")
 
@@ -18,15 +18,6 @@ local function joinQueryParts(parts)
         return ""
     end
     return table.concat(parts, " ")
-end
-
-local function newTableSink(target)
-    return function(chunk, err)
-        if chunk then
-            target[#target + 1] = chunk
-        end
-        return 1, err
-    end
 end
 
 local function getAuthHeaders()
@@ -61,13 +52,21 @@ local function request(path, query)
             headers[key] = value
         end
     end
-    local _, code = http.request{
+    -- Without a deadline a single stalled connection hangs the interface for good: every
+    -- one of these runs on the UI thread. The API answers in well under a second when it
+    -- answers at all, so the large-content values are already generous.
+    local code, _, status = Net.requestToTable({
         url = target,
         headers = headers,
-        sink = newTableSink(response_body),
-    }
+    }, response_body)
+    if not code then
+        return status, ""
+    end
     local body = table.concat(response_body)
-    return tonumber(code), body
+    -- A timeout reports itself as a string where a status would be. Callers only ever
+    -- compare against 200, so passing it through keeps them working and names the reason
+    -- in their logs instead of turning it into a bare nil.
+    return tonumber(code) or code, body
 end
 
 local function buildQuery(opts)
