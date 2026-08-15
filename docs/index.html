@@ -144,6 +144,11 @@ input:focus,select:focus{border-color:var(--accent)}
 .btn-secondary:hover{background:var(--card-hover);border:1px solid var(--border)}
 .btn-icon{background:transparent;color:var(--text2);padding:.5rem;font-size:1.2rem;line-height:1}
 .btn-icon:hover{color:var(--text)}
+/* Links out to the plugin finder, which searches the same catalogue by what a
+   plugin does rather than by name. Styled as the share button so it reads as
+   one of the header actions rather than an advert. */
+.btn-finder{display:flex;align-items:center;gap:.3rem;padding:.4rem .7rem;font-size:.85rem;text-decoration:none;background:transparent;color:var(--text2);border:1px solid transparent;border-radius:var(--radius);transition:all .2s}
+.btn-finder:hover{color:var(--accent2);border-color:var(--accent);background:rgba(233,69,96,.1)}
 .btn-share{display:flex;align-items:center;gap:.3rem;padding:.4rem .7rem;font-size:.85rem;transition:all .2s;background:transparent;color:var(--text2);border:1px solid transparent;border-radius:var(--radius)}
 .btn-share:hover{color:var(--accent2);border-color:var(--accent);background:rgba(233,69,96,.1)}
 .btn-share.has-filter{color:var(--accent2);border-color:var(--accent)}
@@ -249,6 +254,12 @@ input:focus,select:focus{border-color:var(--accent)}
   <div class="header-top">
     <h1>📚 KOReader <span>AppStore</span></h1>
     <div class="header-actions">
+      <a class="btn-finder" href="https://omer-faruq.github.io/koreader-plugin-index/"
+         target="_blank" rel="noopener"
+         title="Search by what a plugin does, not what it is called">
+        <span class="share-icon">🔍</span>
+        <span class="share-text">Find by need</span>
+      </a>
       <button class="btn-icon" onclick="app.refreshData()" title="Refresh">🔄</button>
       <button class="btn-share" id="shareBtn" onclick="app.openShareModal()" title="Export/share results">
         <span class="share-icon">🔗</span>
