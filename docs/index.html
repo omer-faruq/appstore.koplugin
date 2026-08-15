@@ -256,10 +256,15 @@ input:focus,select:focus{border-color:var(--accent)}
     <div class="header-actions">
       <a class="btn-finder" href="https://omer-faruq.github.io/koreader-plugin-index/"
          target="_blank" rel="noopener"
-         title="Search by what a plugin does, not what it is called">
+         title="Browse the same catalogue by category and maintenance status, on a nightly-cached copy">
         <span class="share-icon">🔍</span>
         <span class="share-text">Find by need</span>
       </a>
+      <button class="btn-finder" onclick="app.openAiSearch()"
+         title="Describe what you need in plain words and have a model pick from the matches.&#10;&#10;Runs against a nightly-cached copy of this catalogue, so something published today may be missing. Needs an API key of your own; nothing is charged here.">
+        <span class="share-icon">✦</span>
+        <span class="share-text">AI search</span>
+      </button>
       <button class="btn-icon" onclick="app.refreshData()" title="Refresh">🔄</button>
       <button class="btn-share" id="shareBtn" onclick="app.openShareModal()" title="Export/share results">
         <span class="share-icon">🔗</span>
@@ -714,6 +719,14 @@ const app = {
     const qs = p.toString();
     const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
     history.replaceState(null, '', newUrl);
+  },
+
+  openAiSearch() {
+    // Opens the finder already in AI mode and on the tab being browsed, so the
+    // click lands where it promised rather than on a generic front page.
+    const tab = this.tab === 'patches' ? 'patches' : 'plugins';
+    window.open(`https://omer-faruq.github.io/koreader-plugin-index/?ai=1&tab=${tab}`,
+                '_blank', 'noopener');
   },
 
   toggleTheme() {
