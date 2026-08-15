@@ -113,11 +113,15 @@ input:focus,select:focus{border-color:var(--accent)}
 
 /* Controls bar */
 .controls{display:flex;gap:.75rem;padding:.75rem 1.5rem;background:var(--bg);align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--border);position:sticky;z-index:99}
-.search-box{flex:1;min-width:200px;position:relative}
+.search-box{flex:1;min-width:270px;position:relative}
 .owner-filter-box{position:relative;min-width:140px}
 .owner-filter-box input{width:100%;padding-left:2rem}
 .owner-filter-box .owner-icon{position:absolute;left:.6rem;top:50%;transform:translateY(-50%);color:var(--text3);font-size:.8rem;pointer-events:none}
-.search-box input{width:100%;padding-left:2.2rem}
+.search-box input{width:100%;padding-left:2.2rem;padding-right:7.2rem}
+/* Same control in the same place as on the finder, so the gesture carries
+   between the two pages. */
+.ai-pill{position:absolute;right:.3rem;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:.3rem;padding:.32rem .7rem;font-size:.78rem;font-weight:600;white-space:nowrap;cursor:pointer;color:var(--accent2);background:var(--bg);border:1px solid var(--border);border-radius:999px;transition:all .2s}
+.ai-pill:hover{border-color:var(--accent);background:rgba(233,69,96,.1)}
 .search-icon{position:absolute;left:.7rem;top:50%;transform:translateY(-50%);color:var(--text3);font-size:.9rem;pointer-events:none}
 /* Filter banner */
 .filter-banner{display:none;align-items:center;gap:.6rem;padding:.5rem 1.5rem;background:var(--filter-banner-bg);border-bottom:1px solid var(--accent);font-size:.85rem;color:var(--accent2);position:sticky;z-index:98;transition:transform .25s ease}
@@ -260,11 +264,6 @@ input:focus,select:focus{border-color:var(--accent)}
         <span class="share-icon">🔍</span>
         <span class="share-text">Find by need</span>
       </a>
-      <button class="btn-finder" onclick="app.openAiSearch()"
-         title="Describe what you need in plain words and have a model pick from the matches.&#10;&#10;Runs against a nightly-cached copy of this catalogue, so something published today may be missing. Needs an API key of your own; nothing is charged here.">
-        <span class="share-icon">✦</span>
-        <span class="share-text">AI search</span>
-      </button>
       <button class="btn-icon" onclick="app.refreshData()" title="Refresh">🔄</button>
       <button class="btn-share" id="shareBtn" onclick="app.openShareModal()" title="Export/share results">
         <span class="share-icon">🔗</span>
@@ -284,6 +283,10 @@ input:focus,select:focus{border-color:var(--accent)}
   <div class="search-box">
     <span class="search-icon">🔍</span>
     <input type="text" id="searchInput" placeholder="Search repos... (press Enter)" onkeydown="app.onSearchKeydown(event)">
+    <button class="ai-pill" onclick="app.openAiSearch()"
+      title="Describe what you need in plain words and have a model pick from the matches.&#10;&#10;Runs against a nightly-cached copy of this catalogue, so something published today may be missing. Needs an API key of your own; nothing is charged here.">
+      <span>✦</span> AI search
+    </button>
   </div>
   <div class="owner-filter-box">
     <span class="owner-icon">👤</span>
