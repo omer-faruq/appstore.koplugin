@@ -17,5 +17,11 @@ return {
     -- ignored -- use an absolute path matching one of your actual
     -- "extra_plugin_paths" entries, like the example below.
     -- plugin_install_path = "/home/user/.config/koreader/plugins-ext/",
+
+    -- Optional: GitHub download mirror / proxy prefix.
+    -- Supported preset IDs: "direct" (default), "gh_proxy_com", "gh_ddlc_top", "ghproxy_net", "custom"
+    -- download_mirror_preset = "gh_proxy_com",
+    -- If using a custom mirror URL prefix:
+    -- download_mirror_prefix = "https://gh-proxy.com/",
 }
 

@@ -233,7 +233,7 @@ Tools live in `l10n/tools/` (run with the LuaJIT that ships with KOReader, or an
 
 ```
 # 1. Regenerate the English key template after changing source strings
-luajit l10n/tools/extract.lua main.lua appstore_updates.lua appstore_repo_content.lua _meta.lua > l10n/template.lua
+luajit l10n/tools/extract.lua main.lua appstore_updates.lua appstore_repo_content.lua appstore_mirror.lua _meta.lua > l10n/template.lua
 
 # 2. Copy template.lua to l10n/<code>.lua (matching KOReader's locale code) and translate the values
 
