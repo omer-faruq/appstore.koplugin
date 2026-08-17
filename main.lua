@@ -2712,24 +2712,26 @@ function AppStore:startMatchFlow()
         input_type = "number",
         buttons = {
             {
-                text = _("Cancel"),
-                id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
-                callback = function()
-                    UIManager:close(dialog)
-                end,
-            },
-            {
-                text = _("Next"),
-                is_enter_default = true,
-                callback = function()
-                    local value = tonumber(dialog:getInputText())
-                    if not value or value < 1 or value > #unmatched then
-                        UIManager:show(InfoMessage:new{ text = _("Invalid selection."), timeout = 3 })
-                        return
-                    end
-                    UIManager:close(dialog)
-                    self:startMatchFlowForPlugin(unmatched[value])
-                end,
+                {
+                    text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Next"),
+                    is_enter_default = true,
+                    callback = function()
+                        local value = tonumber(dialog:getInputText())
+                        if not value or value < 1 or value > #unmatched then
+                            UIManager:show(InfoMessage:new{ text = _("Invalid selection."), timeout = 3 })
+                            return
+                        end
+                        UIManager:close(dialog)
+                        self:startMatchFlowForPlugin(unmatched[value])
+                    end,
+                },
             },
         },
     }
@@ -8236,53 +8238,57 @@ function AppStore:promptCustomDownloadMirror(on_close_cb)
         description = _("Enter custom mirror prefix (e.g., https://ghproxy.net/):"),
         input = current_custom,
         input_hint = "https://...",
+        -- ButtonTable reads this as a list of rows, each row a list of buttons:
+        -- a flat list here renders as empty rows, and leaves Enter dead too.
         buttons = {
             {
-                text = _("Cancel"),
-                id = "close",
-                callback = function()
-                    UIManager:close(dialog)
-                    self:showDownloadSourceDialog(on_close_cb)
-                end,
-            },
-            {
-                text = _("Save"),
-                is_enter_default = true,
-                callback = function()
-                    local custom_url = Mirror.normalizeCustomUrl(dialog:getInputText())
-                    if not custom_url then
-                        UIManager:show(InfoMessage:new{
-                            text = _("Invalid URL prefix. Enter a complete http:// or https:// URL."),
-                            timeout = 4,
-                        })
-                        return
-                    end
-                    local function commit()
+                {
+                    text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
+                    callback = function()
                         UIManager:close(dialog)
-                        Mirror.setPreset("custom", custom_url)
-                        UIManager:show(InfoMessage:new{
-                            text = string.format(_("Download source updated to %s."), Mirror.getCurrentLabel()),
-                            timeout = 3,
-                        })
-                        if on_close_cb then
-                            on_close_cb()
-                        else
-                            self:showAppStoreSettingsDialog()
+                        self:showDownloadSourceDialog(on_close_cb)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local custom_url = Mirror.normalizeCustomUrl(dialog:getInputText())
+                        if not custom_url then
+                            UIManager:show(InfoMessage:new{
+                                text = _("Invalid URL prefix. Enter a complete http:// or https:// URL."),
+                                timeout = 4,
+                            })
+                            return
                         end
-                    end
-                    -- Plain http stays allowed: a mirror on your own network has no
-                    -- certificate to offer. But what arrives through it is plugin code
-                    -- that gets extracted and run, so it is worth one confirmation.
-                    if Mirror.isInsecurePrefix(custom_url) then
-                        UIManager:show(ConfirmBox:new{
-                            text = _("This mirror uses plain http://. The connection is not encrypted, so the plugin code downloaded through it could be altered on the way. Use it anyway?"),
-                            ok_text = _("Use it"),
-                            ok_callback = commit,
-                        })
-                        return
-                    end
-                    commit()
-                end,
+                        local function commit()
+                            UIManager:close(dialog)
+                            Mirror.setPreset("custom", custom_url)
+                            UIManager:show(InfoMessage:new{
+                                text = string.format(_("Download source updated to %s."), Mirror.getCurrentLabel()),
+                                timeout = 3,
+                            })
+                            if on_close_cb then
+                                on_close_cb()
+                            else
+                                self:showAppStoreSettingsDialog()
+                            end
+                        end
+                        -- Plain http stays allowed: a mirror on your own network has no
+                        -- certificate to offer. But what arrives through it is plugin code
+                        -- that gets extracted and run, so it is worth one confirmation.
+                        if Mirror.isInsecurePrefix(custom_url) then
+                            UIManager:show(ConfirmBox:new{
+                                text = _("This mirror uses plain http://. The connection is not encrypted, so the plugin code downloaded through it could be altered on the way. Use it anyway?"),
+                                ok_text = _("Use it"),
+                                ok_callback = commit,
+                            })
+                            return
+                        end
+                        commit()
+                    end,
+                },
             },
         },
     }
@@ -9388,24 +9394,26 @@ function AppStore:promptSelection(descriptors, title)
         input_type = "number",
         buttons = {
             {
-                text = _("Cancel"),
-                id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
-                callback = function()
-                    UIManager:close(dialog)
-                end,
-            },
-            {
-                text = _("Open"),
-                is_enter_default = true,
-                callback = function()
-                    local value = tonumber(dialog:getInputText())
-                    if not value or value < 1 or value > #descriptors then
-                        UIManager:show(InfoMessage:new{ text = _("Invalid selection."), timeout = 3 })
-                        return
-                    end
-                    UIManager:close(dialog)
-                    self:promptRepoAction(descriptors[value])
-                end,
+                {
+                    text = _("Cancel"),
+                    id = "close", -- InputDialog:onCloseDialog looks this up for the Back key
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Open"),
+                    is_enter_default = true,
+                    callback = function()
+                        local value = tonumber(dialog:getInputText())
+                        if not value or value < 1 or value > #descriptors then
+                            UIManager:show(InfoMessage:new{ text = _("Invalid selection."), timeout = 3 })
+                            return
+                        end
+                        UIManager:close(dialog)
+                        self:promptRepoAction(descriptors[value])
+                    end,
+                },
             },
         },
     }
