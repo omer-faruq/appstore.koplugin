@@ -1,5 +1,6 @@
 -- appstore_plugin_paths_test.lua
--- Run with: cd <extracted-koreader-dir> && ./luajit plugins/appstore.koplugin/appstore_plugin_paths_test.lua
+-- Run with: cd <extracted-koreader-dir> && ./luajit plugins/appstore.koplugin/tests/appstore_plugin_paths_test.lua
+-- Needs KOReader's own luajit: appstore_plugin_paths pulls in datastorage and lfs.
 package.path = "plugins/appstore.koplugin/?.lua;" .. package.path
 
 local scratch = "/tmp/appstore_plugin_paths_test"

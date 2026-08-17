@@ -258,6 +258,21 @@ luajit l10n/tools/validate.lua l10n/template.lua l10n/<code>.lua
 Keep the keys byte-for-byte identical to the source strings (including `%s`/`%d`
 placeholders, newlines and characters such as `→ · — ≥ ⭐ …`) — only the values change.
 
+## Tests
+
+`tests/` holds standalone scripts for the modules whose logic can be exercised without
+the UI. Each prints one line per check and exits non-zero on the first failure, so they
+can be chained. Run them from an extracted KOReader directory:
+
+```
+./luajit plugins/appstore.koplugin/tests/appstore_plugin_paths_test.lua
+./luajit plugins/appstore.koplugin/tests/appstore_mirror_test.lua
+```
+
+The plugin_paths one needs KOReader's own LuaJIT (it loads `datastorage` and `lfs`).
+The mirror one stubs its KOReader dependencies and runs under any LuaJIT, as long as
+the working directory is a KOReader tree so that `common/socket/url.lua` is reachable.
+
 ## Credits
 
 This plugin and documentation were prepared with Windsurf (AI).
