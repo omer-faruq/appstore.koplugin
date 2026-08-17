@@ -9,6 +9,10 @@ end
 
 local SETTING_PRESET_KEY = "download_mirror_preset"
 local SETTING_CUSTOM_URL_KEY = "download_mirror_custom_url"
+-- Alongside each setting, a copy of what appstore_configuration.lua held the
+-- last time it was read. See syncFromConfig() at the bottom of this file.
+local SETTING_PRESET_FROM_CONFIG_KEY = "download_mirror_preset_from_config"
+local SETTING_CUSTOM_URL_FROM_CONFIG_KEY = "download_mirror_custom_url_from_config"
 
 -- Only these hosts get the mirror prefix. Every URL the plugin downloads today
 -- is one of them, so the guard changes nothing now; it is here so that a URL
@@ -85,18 +89,12 @@ function Mirror.getPresets()
     return list
 end
 
+-- Both reads below go to the settings store only: what the config file holds is
+-- copied there by syncFromConfig() at load time, so there is no second source
+-- to consult here.
 function Mirror.getCurrentPresetId()
     local preset_id = AppStoreSettings:readSetting(SETTING_PRESET_KEY)
-    if not preset_id or preset_id == "" then
-        if AppStoreConfig.download_mirror_preset then
-            preset_id = AppStoreConfig.download_mirror_preset
-        elseif AppStoreConfig.download_mirror_prefix then
-            preset_id = "custom"
-        else
-            preset_id = "direct"
-        end
-    end
-    if not findPreset(preset_id) then
+    if not preset_id or preset_id == "" or not findPreset(preset_id) then
         return "direct"
     end
     if preset_id == "custom" and Mirror.getCustomUrl() == "" then
@@ -106,11 +104,7 @@ function Mirror.getCurrentPresetId()
 end
 
 function Mirror.getCustomUrl()
-    local custom = AppStoreSettings:readSetting(SETTING_CUSTOM_URL_KEY)
-    if not custom or custom == "" then
-        custom = AppStoreConfig.download_mirror_prefix or ""
-    end
-    return Mirror.normalizeCustomUrl(custom) or ""
+    return Mirror.normalizeCustomUrl(AppStoreSettings:readSetting(SETTING_CUSTOM_URL_KEY)) or ""
 end
 
 function Mirror.getCurrentPrefix()
@@ -190,5 +184,50 @@ function Mirror.apply(url)
     end
     return prefix .. url
 end
+
+-- appstore_configuration.lua and the settings store both hold a download
+-- source, and the config file has no way to know the user has since picked
+-- something else in the UI. So each config value is copied into the settings
+-- store together with a second copy of what the config file said at the time.
+-- On every load the config file is compared against that copy:
+--
+--   * unchanged -- whatever is in the settings store stands, which is the
+--     user's UI choice if they made one;
+--   * changed (edited, added or removed) -- the config file has spoken more
+--     recently than the UI, so its value replaces both copies.
+--
+-- The upshot is that editing the config file always takes effect, and so does
+-- changing the setting in the UI, whichever of the two happened last.
+local function syncSettingFromConfig(config_value, setting_key, from_config_key, transform)
+    if config_value == AppStoreSettings:readSetting(from_config_key) then
+        return false
+    end
+    AppStoreSettings:saveSetting(from_config_key, config_value)
+    -- A config value that cannot be used (transform returns nil) clears the
+    -- setting rather than being stored. The copy above still records what was
+    -- read, so an unusable value is not re-applied on every launch.
+    if config_value ~= nil and transform then
+        config_value = transform(config_value)
+    end
+    AppStoreSettings:saveSetting(setting_key, config_value)
+    return true
+end
+
+local function syncFromConfig()
+    -- A prefix on its own means the custom preset, the same way the UI treats it.
+    local config_preset = AppStoreConfig.download_mirror_preset
+    if not config_preset and AppStoreConfig.download_mirror_prefix then
+        config_preset = "custom"
+    end
+    local changed = syncSettingFromConfig(config_preset, SETTING_PRESET_KEY,
+        SETTING_PRESET_FROM_CONFIG_KEY)
+    changed = syncSettingFromConfig(AppStoreConfig.download_mirror_prefix, SETTING_CUSTOM_URL_KEY,
+        SETTING_CUSTOM_URL_FROM_CONFIG_KEY, Mirror.normalizeCustomUrl) or changed
+    if changed then
+        AppStoreSettings:flush()
+    end
+end
+
+syncFromConfig()
 
 return Mirror

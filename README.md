@@ -202,7 +202,7 @@ Scope, worth knowing before you switch:
 - **What is *not* routed:** every `api.github.com` call, i.e. browsing, searching, repository metadata and update checks. Those keep going to GitHub directly. This is deliberate: your GitHub PAT travels in the `Authorization` header of those requests, and sending it through a third-party proxy would hand your token to whoever runs it. So a mirror helps with downloads, not with a blocked API host.
 - **Trust:** a mirror operator controls the bytes that land in your plugins folder, and there is no checksum or signature check. Prefer **Direct (GitHub)** unless you have a reason not to.
 
-The choice can also be pre-seeded from `appstore_configuration.lua` (see `appstore_configuration.sample.lua`). Those keys act as an initial default only — once you pick a source in the UI, the stored setting wins from then on.
+The same setting can also be written in `appstore_configuration.lua` as `download_mirror_preset` / `download_mirror_prefix` (see `appstore_configuration.sample.lua`). The two do not fight: whichever was touched last applies. Pick a source in the UI and it overrides the config file; edit the config file afterwards and it wins again. Removing the key counts as an edit and restores the default. This is how a config file you sync between devices keeps working even after you have poked at the setting on one of them.
 
 ## Troubleshooting
 
