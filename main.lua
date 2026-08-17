@@ -1,6 +1,5 @@
 ﻿local Device = require("device")
 local DataStorage = require("datastorage")
-local LuaSettings = require("luasettings")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -38,8 +37,10 @@ local _ = require("appstore_gettext")
 local Input = Device.input
 
 local Cache = require("appstore_cache")
+local AppStoreSettings = require("appstore_settings")
 local GitHub = require("appstore_net_github")
 local RepoContent = require("appstore_repo_content")
+local Mirror = require("appstore_mirror")
 local InstallStore = require("appstore_installs")
 local util = require("util")
 local NetworkMgr = require("ui/network/manager")
@@ -50,9 +51,6 @@ local sha2 = require("ffi/sha2")
 local lfs = require("libs/libkoreader-lfs")
 local json = require("json")
 local logger = require("logger")
-
-local SETTINGS_PATH = DataStorage:getSettingsDir() .. "/appstore.lua"
-local AppStoreSettings = LuaSettings:open(SETTINGS_PATH)
 
 local ALLOW_DELETE_UNLINKED_PLUGINS_KEY = "allow_delete_unlinked_plugins"
 local ALLOW_DELETE_UNLINKED_PATCHES_KEY = "allow_delete_unlinked_patches"
@@ -1866,6 +1864,19 @@ function AppStore:showPluginUpdatesSettings()
 
     table.insert(buttons, {
         {
+            text = string.format(_("Download source: %s"), Mirror.getCurrentLabel()),
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                UIManager:close(button_dialog)
+                self:showDownloadSourceDialog(function()
+                    self:showPluginUpdatesSettings()
+                end)
+            end,
+        },
+    })
+
+    table.insert(buttons, {
+        {
             text = _("Close"),
             background = Blitbuffer.COLOR_WHITE,
             callback = function()
@@ -1979,6 +1990,18 @@ function AppStore:showPatchUpdatesSettings()
                             self:showPatchUpdatesDialog()
                         end,
                     })
+                end,
+            },
+        },
+        {
+            {
+                text = string.format(_("Download source: %s"), Mirror.getCurrentLabel()),
+                background = Blitbuffer.COLOR_WHITE,
+                callback = function()
+                    UIManager:close(button_dialog)
+                    self:showDownloadSourceDialog(function()
+                        self:showPatchUpdatesSettings()
+                    end)
                 end,
             },
         },
@@ -2327,7 +2350,7 @@ function AppStore:checkAllUpdates()
                 return nil, "Missing repository metadata for remote fetch."
             end
             branch = branch or "HEAD"
-            local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path)
+            local url = Mirror.apply(string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path))
             local response = {}
             -- Off the UI thread here, but a subprocess that never returns still leaves the
             -- check hanging and its zombie behind.
@@ -4202,7 +4225,7 @@ fetchGitHubRaw = function(owner, repo_name, branch, path)
         return nil, _("Missing repository metadata for remote fetch.")
     end
     branch = branch or "HEAD"
-    local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path)
+    local url = Mirror.apply(string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo_name, branch, path))
     local response = {}
     -- On the UI thread: a stalled connection would hold the whole interface.
     local code, _, status = Net.requestToTable({
@@ -8047,6 +8070,17 @@ function AppStore:showAppStoreSettingsDialog()
         },
     })
 
+    table.insert(buttons, {
+        {
+            text = string.format(_("Download source: %s"), Mirror.getCurrentLabel()),
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                UIManager:close(dialog)
+                self:showDownloadSourceDialog()
+            end,
+        },
+    })
+
     if current_kind == "plugin" then
         table.insert(buttons, {
             {
@@ -8128,6 +8162,116 @@ function AppStore:clearCachedReadmeFiles()
         end,
     }
     UIManager:show(confirm)
+end
+
+function AppStore:showDownloadSourceDialog(on_close_cb)
+    local return_cb = on_close_cb or function()
+        self:showAppStoreSettingsDialog()
+    end
+    local presets = Mirror.getPresets()
+    local current_id = Mirror.getCurrentPresetId()
+    local buttons = {}
+    local dialog
+
+    for idx, preset in ipairs(presets) do
+        local is_selected = preset.id == current_id
+        local mark = is_selected and "\xE2\x98\x91" or "\xE2\x98\x90"
+        local label = preset.name
+        if preset.id == "custom" then
+            local custom_url = Mirror.getCustomUrl()
+            if custom_url and custom_url ~= "" then
+                label = string.format(_("Custom (%s)"), custom_url)
+            else
+                label = _("Custom mirror URL…")
+            end
+        end
+
+        table.insert(buttons, {
+            {
+                text = string.format("%s  %s", mark, label),
+                background = Blitbuffer.COLOR_WHITE,
+                callback = function()
+                    UIManager:close(dialog)
+                    if preset.id == "custom" then
+                        self:promptCustomDownloadMirror(on_close_cb)
+                    else
+                        Mirror.setPreset(preset.id)
+                        UIManager:show(InfoMessage:new{
+                            text = string.format(_("Download source updated to %s."), preset.name),
+                            timeout = 3,
+                        })
+                        return_cb()
+                    end
+                end,
+            },
+        })
+    end
+
+    table.insert(buttons, {
+        {
+            text = _("Back"),
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                UIManager:close(dialog)
+                return_cb()
+            end,
+        },
+    })
+
+    dialog = ButtonDialog:new{
+        title = _("Select download source"),
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
+function AppStore:promptCustomDownloadMirror(on_close_cb)
+    local current_custom = Mirror.getCustomUrl()
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Custom mirror prefix"),
+        description = _("Enter custom mirror prefix (e.g., https://ghproxy.net/):"),
+        input = current_custom,
+        input_hint = "https://...",
+        buttons = {
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:showDownloadSourceDialog(on_close_cb)
+                end,
+            },
+            {
+                text = _("Save"),
+                is_enter_default = true,
+                callback = function()
+                    local custom_url = Mirror.normalizeCustomUrl(dialog:getInputText())
+                    if not custom_url then
+                        UIManager:show(InfoMessage:new{
+                            text = _("Invalid URL prefix. Enter a complete http:// or https:// URL."),
+                            timeout = 4,
+                        })
+                        return
+                    end
+                    UIManager:close(dialog)
+                    Mirror.setPreset("custom", custom_url)
+                    UIManager:show(InfoMessage:new{
+                        text = string.format(_("Download source updated to %s."), Mirror.getCurrentLabel()),
+                        timeout = 3,
+                    })
+                    if on_close_cb then
+                        on_close_cb()
+                    else
+                        self:showAppStoreSettingsDialog()
+                    end
+                end,
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 function AppStore:promptInstallPluginFromURL()
@@ -8586,6 +8730,7 @@ function AppStore:renderRepoLines(descriptors)
 end
 
 downloadToFile = function(url, local_path)
+    url = Mirror.apply(url)
     local dir = local_path:match("^(.*)/")
     if dir and dir ~= "" then
         util.makePath(dir)

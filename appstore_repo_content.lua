@@ -8,6 +8,7 @@ local util = require("util")
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
 local Version = require("version")
+local Mirror = require("appstore_mirror")
 
 local RepoContent = {}
 
@@ -53,7 +54,7 @@ local function downloadReadmeBody(owner, repo)
     if not owner or not repo then
         return nil, "missing owner/repo"
     end
-    local url = buildRawUrl(owner, repo)
+    local url = Mirror.apply(buildRawUrl(owner, repo))
     local code, status, body = download(url)
     -- Same rule as fetchGitHubRaw: a throw has no code, and its reason is not HTTP.
     if tonumber(code) ~= 200 then
