@@ -8173,9 +8173,11 @@ function AppStore:showDownloadSourceDialog(on_close_cb)
     local buttons = {}
     local dialog
 
-    for idx, preset in ipairs(presets) do
-        local is_selected = preset.id == current_id
-        local mark = is_selected and "\xE2\x98\x91" or "\xE2\x98\x90"
+    -- Indexed rather than ipairs: `_` is the gettext function used below, so it
+    -- cannot double as the throwaway loop variable here.
+    for idx = 1, #presets do
+        local preset = presets[idx]
+        local mark = preset.id == current_id and "☑ " or "☐ "
         local label = preset.name
         if preset.id == "custom" then
             local custom_url = Mirror.getCustomUrl()
@@ -8188,7 +8190,7 @@ function AppStore:showDownloadSourceDialog(on_close_cb)
 
         table.insert(buttons, {
             {
-                text = string.format("%s  %s", mark, label),
+                text = mark .. label,
                 background = Blitbuffer.COLOR_WHITE,
                 callback = function()
                     UIManager:close(dialog)
@@ -8255,17 +8257,31 @@ function AppStore:promptCustomDownloadMirror(on_close_cb)
                         })
                         return
                     end
-                    UIManager:close(dialog)
-                    Mirror.setPreset("custom", custom_url)
-                    UIManager:show(InfoMessage:new{
-                        text = string.format(_("Download source updated to %s."), Mirror.getCurrentLabel()),
-                        timeout = 3,
-                    })
-                    if on_close_cb then
-                        on_close_cb()
-                    else
-                        self:showAppStoreSettingsDialog()
+                    local function commit()
+                        UIManager:close(dialog)
+                        Mirror.setPreset("custom", custom_url)
+                        UIManager:show(InfoMessage:new{
+                            text = string.format(_("Download source updated to %s."), Mirror.getCurrentLabel()),
+                            timeout = 3,
+                        })
+                        if on_close_cb then
+                            on_close_cb()
+                        else
+                            self:showAppStoreSettingsDialog()
+                        end
                     end
+                    -- Plain http stays allowed: a mirror on your own network has no
+                    -- certificate to offer. But what arrives through it is plugin code
+                    -- that gets extracted and run, so it is worth one confirmation.
+                    if Mirror.isInsecurePrefix(custom_url) then
+                        UIManager:show(ConfirmBox:new{
+                            text = _("This mirror uses plain http://. The connection is not encrypted, so the plugin code downloaded through it could be altered on the way. Use it anyway?"),
+                            ok_text = _("Use it"),
+                            ok_callback = commit,
+                        })
+                        return
+                    end
+                    commit()
                 end,
             },
         },

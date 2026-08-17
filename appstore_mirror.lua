@@ -10,6 +10,20 @@ end
 local SETTING_PRESET_KEY = "download_mirror_preset"
 local SETTING_CUSTOM_URL_KEY = "download_mirror_custom_url"
 
+-- Only these hosts get the mirror prefix. Every URL the plugin downloads today
+-- is one of them, so the guard changes nothing now; it is here so that a URL
+-- arriving from somewhere else later (a field in API data, a user-supplied
+-- address) is not silently handed to a third-party proxy.
+local MIRRORED_HOSTS = {
+    ["github.com"] = true,
+    ["www.github.com"] = true,
+    ["api.github.com"] = true,
+    ["codeload.github.com"] = true,
+    ["raw.githubusercontent.com"] = true,
+    ["objects.githubusercontent.com"] = true,
+    ["gist.githubusercontent.com"] = true,
+}
+
 local PRESET_DEFS = {
     { id = "direct", name = _("Direct (GitHub)"), prefix = "" },
     { id = "gh_proxy_com", name = "gh-proxy.com", prefix = "https://gh-proxy.com/" },
@@ -20,8 +34,11 @@ local PRESET_DEFS = {
 
 local Mirror = {}
 
+-- The loop variable is deliberately not named `_`: that is the gettext
+-- function this file uses for the preset names just above.
 local function findPreset(preset_id)
-    for _, preset in ipairs(PRESET_DEFS) do
+    for idx = 1, #PRESET_DEFS do
+        local preset = PRESET_DEFS[idx]
         if preset.id == preset_id then
             return preset
         end
@@ -131,6 +148,23 @@ function Mirror.setPreset(preset_id, custom_url)
     return true
 end
 
+--- True for a prefix that uses plain, unencrypted http.
+-- These are accepted on purpose: a self-hosted mirror on a LAN has no
+-- certificate to offer. Callers warn before storing one, because what comes
+-- back through it is plugin code that gets extracted and run.
+function Mirror.isInsecurePrefix(prefix)
+    return type(prefix) == "string" and prefix:lower():find("^http://") ~= nil
+end
+
+-- Host of an http(s) URL, without any port or userinfo, lowercased.
+local function urlHost(url)
+    local authority = url:match("^https?://([^/?#]+)")
+    if not authority then
+        return nil
+    end
+    return authority:gsub("^[^@]*@", ""):gsub(":%d+$", ""):lower()
+end
+
 function Mirror.apply(url)
     if not url or url == "" then
         return url
@@ -141,6 +175,9 @@ function Mirror.apply(url)
     end
     -- Avoid duplicate prefixing
     if url:sub(1, #prefix) == prefix then
+        return url
+    end
+    if not MIRRORED_HOSTS[urlHost(url) or ""] then
         return url
     end
     -- Convert GitHub's API zipball URL to a form supported by download mirrors.

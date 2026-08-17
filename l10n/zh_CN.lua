@@ -374,4 +374,7 @@ return {
     ["Enter custom mirror prefix (e.g., https://ghproxy.net/):"] = "输入自定义镜像前缀（例如 https://ghproxy.net/）：",
     ["Invalid URL prefix. Enter a complete http:// or https:// URL."] = "无效的 URL 前缀。请输入完整的 http:// 或 https:// URL。",
     ["Download source updated to %s."] = "下载源已更新为 %s。",
+    ["Save"] = "保存",
+    ["This mirror uses plain http://. The connection is not encrypted, so the plugin code downloaded through it could be altered on the way. Use it anyway?"] = "该镜像使用明文 http://。连接未加密，通过它下载的插件代码可能在传输途中被篡改。仍要使用吗？",
+    ["Use it"] = "仍要使用",
 }

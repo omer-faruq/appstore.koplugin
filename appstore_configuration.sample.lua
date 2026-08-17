@@ -18,10 +18,15 @@ return {
     -- "extra_plugin_paths" entries, like the example below.
     -- plugin_install_path = "/home/user/.config/koreader/plugins-ext/",
 
-    -- Optional: GitHub download mirror / proxy prefix.
+    -- Optional: GitHub download mirror / proxy prefix. Both keys below are only
+    -- an initial default: as soon as a download source is picked in the UI
+    -- (gear icon -> Download source) that stored choice wins from then on, even
+    -- when it is "direct". Downloads and raw file fetches are routed; calls to
+    -- api.github.com are not, so that the token above never reaches the mirror.
     -- Supported preset IDs: "direct" (default), "gh_proxy_com", "gh_ddlc_top", "ghproxy_net", "custom"
     -- download_mirror_preset = "gh_proxy_com",
-    -- If using a custom mirror URL prefix:
+    -- Custom prefix. Setting only this one implies download_mirror_preset = "custom";
+    -- it is stored under the "download_mirror_custom_url" settings key once edited in the UI.
     -- download_mirror_prefix = "https://gh-proxy.com/",
 }
 

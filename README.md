@@ -190,6 +190,20 @@ By default, the AppStore plugin **excludes** repositories that are forks with ze
 
 **Note**: Changing this setting does not automatically refresh the cache. Use the **Refresh cache** action from the toolbar to apply the new filter scope to your current results.
 
+## Download Source (mirror / proxy)
+
+Where GitHub itself is slow or unreachable, downloads can be routed through a proxy prefix instead. The setting lives under the **gear icon** (⚙️) → **Download source**, and is also reachable from the installed-plugins and installed-patches settings dialogs. It defaults to **Direct (GitHub)**; leave it there and nothing about the plugin's network behaviour changes.
+
+Three public mirrors are offered as presets (gh-proxy.com, gh.ddlc.top, ghproxy.net), plus **Custom** for a prefix of your own — including one you host yourself, e.g. `http://192.168.1.10:8080/`. A custom prefix must be a complete `http://` or `https://` URL with no query string; a trailing `/` is added if you omit one. Plain `http://` is accepted for self-hosted mirrors but asks for confirmation first, because the connection is unencrypted and what comes back through it is plugin code that gets extracted and run.
+
+Scope, worth knowing before you switch:
+
+- **What is routed:** plugin archives, release assets, patch files and README fetches — everything that goes through a raw or download URL.
+- **What is *not* routed:** every `api.github.com` call, i.e. browsing, searching, repository metadata and update checks. Those keep going to GitHub directly. This is deliberate: your GitHub PAT travels in the `Authorization` header of those requests, and sending it through a third-party proxy would hand your token to whoever runs it. So a mirror helps with downloads, not with a blocked API host.
+- **Trust:** a mirror operator controls the bytes that land in your plugins folder, and there is no checksum or signature check. Prefer **Direct (GitHub)** unless you have a reason not to.
+
+The choice can also be pre-seeded from `appstore_configuration.lua` (see `appstore_configuration.sample.lua`). Those keys act as an initial default only — once you pick a source in the UI, the stored setting wins from then on.
+
 ## Troubleshooting
 
 | Symptom | Likely Cause | Suggested Fix |
