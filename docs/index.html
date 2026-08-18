@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="google-site-verification" content="rGvl9BT59_TNaiSgdN20o6DKdhEkNjcqviuyzGLrhkU">
 <title>KOReader AppStore - Discover & Install Community Plugins and Patches</title>
 
 <!-- SEO Meta Tags -->
@@ -133,6 +134,7 @@ input:focus,select:focus{border-color:var(--accent)}
 /* Error banner */
 .error-banner{display:none;padding:.6rem 1.5rem;background:#d32f2f;color:#fff;font-size:.85rem;text-align:center;position:sticky;z-index:99}
 .error-banner.visible{display:block}
+.error-banner a{color:#fff;text-decoration:underline;font-weight:600}
 /* Search overlay */
 .search-overlay{display:none;position:fixed;inset:0;background:var(--overlay-bg);z-index:150;align-items:center;justify-content:center;flex-direction:column;gap:.75rem}
 .search-overlay.visible{display:flex}
@@ -633,6 +635,16 @@ function md2html(md, owner, repo) {
 }
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+// ─── Fallback when GitHub's API is unavailable (rate limit / network) ───
+// A static, pre-built plugin index that needs no API calls, so it still works
+// when we cannot talk to GitHub at all.
+const PLUGIN_INDEX_URL = 'https://omer-faruq.github.io/koreader-plugin-index/';
+function pluginIndexHint(style) {
+  return `<p style="margin-top:.75rem;${style || ''}">In the meantime you can browse the static `
+    + `<a href="${PLUGIN_INDEX_URL}" target="_blank" rel="noopener">KOReader Plugin Index</a>`
+    + ` — it needs no GitHub API requests, so it works even while the limit is exhausted.</p>`;
+}
+
 // ─── Language colors (common ones) ───
 const LANG_COLORS = {
   Lua:'#000080',Python:'#3572A5',JavaScript:'#f1e05a',TypeScript:'#3178c6',
@@ -891,9 +903,11 @@ const app = {
       const msg = (e && e.message) ? e.message : String(e);
       const banner = document.getElementById('error-banner');
       if (banner) {
-        banner.textContent = msg;
+        // Point at the static plugin index so a hard failure (rate limit, no
+        // network) still leaves the user somewhere to go.
+        banner.innerHTML = `${esc(msg)} <a href="${PLUGIN_INDEX_URL}" target="_blank" rel="noopener">Browse the static KOReader Plugin Index instead →</a>`;
         banner.classList.add('visible');
-        setTimeout(() => banner.classList.remove('visible'), 12000);
+        setTimeout(() => banner.classList.remove('visible'), 20000);
       } else {
         alert(msg);
       }
@@ -1369,11 +1383,13 @@ const app = {
       } else {
         html += `<p style="margin-top:.75rem">Your token's rate limit is exhausted. Please wait a minute and click 🔄 to retry, or use a different token in ⚙️ Settings.</p>`;
       }
+      html += pluginIndexHint();
     } else {
       titleEl.textContent = '⚠️ Some requests failed';
       const firstMsg = (errors[0] && errors[0].error && errors[0].error.message) || String(errors[0].error || 'Unknown error');
       html += `<p>${errors.length} of ${total} GitHub API request(s) failed, so the repository list may be <strong>incomplete</strong>.</p>`;
       html += `<p style="margin-top:.5rem;font-size:.85rem;color:var(--text3)">${esc(firstMsg)}</p>`;
+      html += pluginIndexHint();
     }
     bodyEl.innerHTML = html;
     modal.classList.add('open');
