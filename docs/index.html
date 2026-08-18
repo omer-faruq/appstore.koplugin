@@ -4,58 +4,167 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="google-site-verification" content="rGvl9BT59_TNaiSgdN20o6DKdhEkNjcqviuyzGLrhkU">
-<title>KOReader AppStore - Discover & Install Community Plugins and Patches</title>
+<title>KOReader AppStore – Browse Community Plugins &amp; Patches</title>
 
 <!-- SEO Meta Tags -->
-<meta name="description" content="Browse, discover, and install community-created KOReader plugins and user patches. Search GitHub repositories, view READMEs, and manage updates directly from your e-reader device.">
-<meta name="keywords" content="KOReader, plugins, patches, e-reader, ebook reader, open source, GitHub, community plugins, KOReader extensions, Kobo, Kindle, Android">
-<meta name="author" content="KOReader Community">
-<meta name="robots" content="index, follow">
+<meta name="description" content="Browse every community KOReader plugin and user patch in one place: search GitHub, read the READMEs, sort by stars, and install straight from your e-reader.">
+<meta name="keywords" content="KOReader, KOReader plugins, KOReader patches, user patches, koplugin, e-reader, ebook reader, open source, GitHub, community plugins, KOReader extensions, Kobo, Kindle, reMarkable, Android">
+<meta name="author" content="omer-faruq">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<meta name="googlebot" content="index, follow">
 <link rel="canonical" href="https://omer-faruq.github.io/appstore.koplugin/">
+<meta name="application-name" content="KOReader AppStore">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#1a1a2e" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f0f2f5" media="(prefers-color-scheme: light)">
+
+<!-- Icons / PWA -->
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+<link rel="sitemap" type="application/xml" href="sitemap.xml">
+
+<!-- Connection hints for the hosts this page talks to -->
+<link rel="preconnect" href="https://api.github.com" crossorigin>
+<link rel="dns-prefetch" href="https://api.github.com">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="dns-prefetch" href="https://raw.githubusercontent.com">
 
 <!-- Open Graph / Facebook -->
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://omer-faruq.github.io/appstore.koplugin/">
-<meta property="og:title" content="KOReader AppStore - Discover & Install Community Plugins">
+<meta property="og:title" content="KOReader AppStore – Browse Community Plugins &amp; Patches">
 <meta property="og:description" content="Browse and install community-created KOReader plugins and user patches. Search GitHub repositories, view READMEs, and manage updates directly from your e-reader.">
 <meta property="og:site_name" content="KOReader AppStore">
 <meta property="og:locale" content="en_US">
+<meta property="og:image" content="https://omer-faruq.github.io/appstore.koplugin/og-image.png">
+<meta property="og:image:secure_url" content="https://omer-faruq.github.io/appstore.koplugin/og-image.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="KOReader AppStore – discover, install and update community plugins and user patches">
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:url" content="https://omer-faruq.github.io/appstore.koplugin/">
-<meta name="twitter:title" content="KOReader AppStore - Discover & Install Community Plugins">
+<meta name="twitter:title" content="KOReader AppStore – Browse Community Plugins &amp; Patches">
 <meta name="twitter:description" content="Browse and install community-created KOReader plugins and user patches. Search GitHub repositories, view READMEs, and manage updates.">
+<meta name="twitter:image" content="https://omer-faruq.github.io/appstore.koplugin/og-image.png">
+<meta name="twitter:image:alt" content="KOReader AppStore – discover, install and update community plugins and user patches">
 
 <!-- Structured Data (JSON-LD) -->
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "WebApplication",
-  "name": "KOReader AppStore",
-  "url": "https://omer-faruq.github.io/appstore.koplugin/",
-  "description": "Discover, install, and update community-created KOReader plugins and user patches without leaving your device. Browse GitHub repositories with filtering, sorting, and offline-friendly caching.",
-  "applicationCategory": "UtilitiesApplication",
-  "operatingSystem": "Cross-platform (KOReader)",
-  "offers": {
-    "@type": "Offer",
-    "price": "0",
-    "priceCurrency": "USD"
-  },
-  "featureList": [
-    "Browse community plugins and patches",
-    "Search GitHub repositories",
-    "View README files",
-    "Install and update plugins",
-    "Offline-friendly cache",
-    "Filter by owner, stars, and topics",
-    "GitHub API integration"
-  ],
-  "softwareRequirements": "KOReader nightly or 2024.12+",
-  "author": {
-    "@type": "Organization",
-    "name": "KOReader Community"
-  }
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://omer-faruq.github.io/appstore.koplugin/#website",
+      "url": "https://omer-faruq.github.io/appstore.koplugin/",
+      "name": "KOReader AppStore",
+      "description": "Web catalogue of community-created KOReader plugins and user patches.",
+      "inLanguage": "en",
+      "publisher": { "@id": "https://github.com/omer-faruq#person" }
+    },
+    {
+      "@type": "Person",
+      "@id": "https://github.com/omer-faruq#person",
+      "name": "omer-faruq",
+      "url": "https://github.com/omer-faruq"
+    },
+    {
+      "@type": ["WebApplication", "SoftwareApplication"],
+      "@id": "https://omer-faruq.github.io/appstore.koplugin/#app",
+      "name": "KOReader AppStore",
+      "alternateName": "appstore.koplugin",
+      "url": "https://omer-faruq.github.io/appstore.koplugin/",
+      "description": "Discover, install, and update community-created KOReader plugins and user patches without leaving your device. Browse GitHub repositories with filtering, sorting, and offline-friendly caching.",
+      "applicationCategory": "UtilitiesApplication",
+      "applicationSubCategory": "E-reader plugin manager",
+      "operatingSystem": "KOReader (Kobo, Kindle, PocketBook, reMarkable, Android, Linux, macOS, Windows)",
+      "browserRequirements": "Requires JavaScript",
+      "softwareRequirements": "KOReader nightly or 2024.12+",
+      "image": "https://omer-faruq.github.io/appstore.koplugin/og-image.png",
+      "screenshot": "https://omer-faruq.github.io/appstore.koplugin/og-image.png",
+      "codeRepository": "https://github.com/omer-faruq/appstore.koplugin",
+      "downloadUrl": "https://github.com/omer-faruq/appstore.koplugin/releases",
+      "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+      "inLanguage": "en",
+      "isPartOf": { "@id": "https://omer-faruq.github.io/appstore.koplugin/#website" },
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "featureList": [
+        "Browse community plugins and patches",
+        "Search GitHub repositories",
+        "View README files",
+        "Install and update plugins",
+        "Offline-friendly cache",
+        "Filter by owner, stars, and topics",
+        "GitHub API integration"
+      ],
+      "author": { "@id": "https://github.com/omer-faruq#person" },
+      "maintainer": { "@id": "https://github.com/omer-faruq#person" }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://omer-faruq.github.io/appstore.koplugin/#faq",
+      "isPartOf": { "@id": "https://omer-faruq.github.io/appstore.koplugin/#website" },
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What is the KOReader AppStore?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "KOReader AppStore is a plugin for KOReader that finds, installs and updates community-created plugins and user patches from GitHub without leaving your e-reader. This page is the web version of the same catalogue, so the collection can be browsed from a desktop browser too."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How do I install the AppStore plugin in KOReader?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Download the latest release, copy the appstore.koplugin folder into KOReader's plugins directory (koreader/plugins on Kobo and Kindle, /sdcard/koreader/plugins on Android, ~/.config/koreader/plugins on Linux), restart KOReader and open Tools then App Store."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What is the difference between a KOReader plugin and a user patch?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "A plugin is a self-contained .koplugin folder that KOReader loads as an add-on. A user patch is a single numbered Lua file (for example 2-my-patch.lua) placed in koreader/patches that changes KOReader's own behaviour at startup. AppStore browses and installs both."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Do I need a GitHub token to use it?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. Anonymous browsing works, but GitHub's search API allows only about 10 requests per minute. Adding a classic personal access token (no scopes required) raises that limit to roughly 30 requests per minute. Fine-grained tokens are not supported by GitHub's search API."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Which devices does it support?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Anything that runs KOReader nightly or 2024.12 and newer: Kobo, Kindle, PocketBook, reMarkable, Android, and the Linux, macOS and Windows desktop builds. A network connection is needed to refresh the catalogue and download files."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does the plugin work offline?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Browsing does. Results and README files are cached under data/cache/AppStore, so entries fetched earlier stay readable without a connection. Installing or updating still needs network access, and a static nightly-built index is used as a fallback when GitHub's API is unreachable."
+          }
+        }
+      ]
+    }
+  ]
 }
 </script>
 <style>
@@ -252,11 +361,30 @@ input:focus,select:focus{border-color:var(--accent)}
   .repo-meta{gap:.5rem}
   .modal{max-width:100%;border-radius:8px}
 }
+
+/* Static page content (crawlable + useful without JS) */
+.page-info{max-width:60rem;margin:2.5rem auto 0;padding:0 1.5rem 3rem}
+.page-info section{border-top:1px solid var(--border);padding-top:1.75rem;margin-top:1.75rem}
+.page-info section:first-child{border-top:none;margin-top:0;padding-top:0}
+.page-info h2{font-size:1.15rem;margin-bottom:.6rem;color:var(--text)}
+.page-info h3{font-size:.95rem;margin:1rem 0 .3rem;color:var(--text)}
+.page-info p,.page-info li{color:var(--text2);font-size:.9rem;line-height:1.65}
+.page-info p{margin-bottom:.6rem}
+.page-info ul,.page-info ol{margin:0 0 .6rem 1.15rem}
+.page-info li{margin-bottom:.25rem}
+.page-info code{background:var(--input-bg);border:1px solid var(--border);border-radius:4px;padding:.05rem .3rem;font-size:.82rem}
+.site-footer{border-top:1px solid var(--border);background:var(--bg2);padding:1.5rem;text-align:center;color:var(--text3);font-size:.85rem}
+.site-footer nav{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;margin-bottom:.6rem}
+.no-js{max-width:60rem;margin:1.5rem auto 0;padding:1rem 1.25rem;background:var(--card);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);color:var(--text2);font-size:.9rem}
+.skip-link{position:absolute;left:-9999px;top:0;background:var(--accent);color:#fff;padding:.5rem 1rem;z-index:200;border-radius:0 0 var(--radius) 0}
+.skip-link:focus{left:0}
 </style>
 </head>
 <body>
 
-<div class="header">
+<a class="skip-link" href="#results">Skip to the plugin list</a>
+
+<header class="header">
   <div class="header-top">
     <h1>📚 KOReader <span>AppStore</span></h1>
     <div class="header-actions">
@@ -266,25 +394,25 @@ input:focus,select:focus{border-color:var(--accent)}
         <span class="share-icon">🔍</span>
         <span class="share-text">Find by need</span>
       </a>
-      <button class="btn-icon" onclick="app.refreshData()" title="Refresh">🔄</button>
-      <button class="btn-share" id="shareBtn" onclick="app.openShareModal()" title="Export/share results">
+      <button class="btn-icon" onclick="app.refreshData()" title="Refresh" aria-label="Refresh the catalogue">🔄</button>
+      <button class="btn-share" id="shareBtn" onclick="app.openShareModal()" title="Export/share results" aria-label="Export or share the current results">
         <span class="share-icon">🔗</span>
         <span class="share-text">Share</span>
       </button>
-      <button class="btn-icon" id="themeToggle" onclick="app.toggleTheme()" title="Toggle theme">🌙</button>
-      <button class="btn-icon" onclick="app.openSettings()" title="Settings">⚙️</button>
+      <button class="btn-icon" id="themeToggle" onclick="app.toggleTheme()" title="Toggle theme" aria-label="Toggle light or dark theme">🌙</button>
+      <button class="btn-icon" onclick="app.openSettings()" title="Settings" aria-label="Open settings">⚙️</button>
     </div>
   </div>
-  <div class="tabs">
+  <nav class="tabs" aria-label="Catalogue sections">
     <button class="tab-btn active" data-tab="plugins" onclick="app.switchTab('plugins')">Plugins</button>
     <button class="tab-btn" data-tab="patches" onclick="app.switchTab('patches')">Patches</button>
-  </div>
-</div>
+  </nav>
+</header>
 
-<div class="controls">
+<div class="controls" role="search" aria-label="Catalogue filters">
   <div class="search-box">
     <span class="search-icon">🔍</span>
-    <input type="text" id="searchInput" placeholder="Search repos... (press Enter)" onkeydown="app.onSearchKeydown(event)">
+    <input type="search" id="searchInput" aria-label="Search plugin and patch repositories" placeholder="Search repos... (press Enter)" onkeydown="app.onSearchKeydown(event)">
     <button class="ai-pill" onclick="app.openAiSearch()"
       title="Describe what you need in plain words and have a model pick from the matches.&#10;&#10;Runs against a nightly-cached copy of this catalogue, so something published today may be missing. Needs an API key of your own; nothing is charged here.">
       <span>✦</span> AI search
@@ -292,10 +420,10 @@ input:focus,select:focus{border-color:var(--accent)}
   </div>
   <div class="owner-filter-box">
     <span class="owner-icon">👤</span>
-    <input type="text" id="ownerInput" list="ownerDatalist" placeholder="Owner filter" oninput="app.onOwnerInput(this.value)">
+    <input type="text" id="ownerInput" list="ownerDatalist" aria-label="Filter by repository owner" placeholder="Owner filter" oninput="app.onOwnerInput(this.value)">
     <datalist id="ownerDatalist"></datalist>
   </div>
-  <select class="sort-select" id="sortSelect" onchange="app.onSortChange(this.value)">
+  <select class="sort-select" id="sortSelect" aria-label="Sort results" onchange="app.onSortChange(this.value)">
     <option value="stars_desc">⭐ Stars (high → low)</option>
     <option value="updated_desc">🕐 Recently updated</option>
     <option value="created_desc">📅 Newest first</option>
@@ -303,7 +431,7 @@ input:focus,select:focus{border-color:var(--accent)}
   </select>
   <div class="min-stars-box">
     <span>⭐ Min:</span>
-    <input type="number" id="minStarsInput" min="0" value="0" onkeydown="app.onMinStarsKeydown(event)" onchange="app.onMinStarsChange(this.value)">
+    <input type="number" id="minStarsInput" aria-label="Minimum number of stars" min="0" value="0" onkeydown="app.onMinStarsKeydown(event)" onchange="app.onMinStarsChange(this.value)">
   </div>
   <label id="includeForksLabel" style="display:none;align-items:center;gap:.4rem;font-size:.8rem;color:var(--text3);cursor:pointer">
     <input type="checkbox" id="includeForks" checked onchange="app.onIncludeForksToggle(this.checked)"> Include Forks
@@ -326,9 +454,126 @@ input:focus,select:focus{border-color:var(--accent)}
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<main id="results">
 <div class="stats-bar" id="statsBar"></div>
-<div class="repo-list" id="repoList"></div>
+<div class="repo-list" id="repoList" aria-live="polite"></div>
+
+<noscript>
+  <div class="no-js">
+    <strong>JavaScript is turned off.</strong> The live catalogue is fetched from the GitHub API in your
+    browser, so the list above stays empty without it. You can still read the overview below, or browse the
+    pre-built catalogue at
+    <a href="https://omer-faruq.github.io/koreader-plugin-index/">the KOReader plugin index</a>
+    and the source at
+    <a href="https://github.com/omer-faruq/appstore.koplugin">github.com/omer-faruq/appstore.koplugin</a>.
+  </div>
+</noscript>
+
+<div class="page-info">
+  <section id="about">
+    <h2>What is KOReader AppStore?</h2>
+    <p>
+      <strong>KOReader AppStore</strong> (<code>appstore.koplugin</code>) is a plugin for
+      <a href="https://koreader.rocks/" rel="noopener">KOReader</a> that discovers, installs and updates
+      community-created <strong>KOReader plugins</strong> and <strong>user patches</strong> without leaving
+      your e-reader. It searches GitHub for the <code>koreader-plugin</code> and
+      <code>koreader-user-patch</code> topics, plus repositories named like <code>KOReader.patches</code> or
+      <code>[name].plugins</code>, then handles the download, the <code>_meta.lua</code> check and the copy
+      into the right folder for you.
+    </p>
+    <p>
+      This page is the web view of that same catalogue: the list at the top is fetched live from GitHub, so
+      you can search, filter by owner or stars, sort, read a README and share a result list from a desktop
+      browser before touching your device.
+    </p>
+  </section>
+
+  <section id="features">
+    <h2>What it does</h2>
+    <ul>
+      <li><strong>Unified browser</strong> for both plugins and user patches, with persistent filters and paging.</li>
+      <li><strong>Search and filter</strong> by name, owner, description, topics, minimum stars and fork status.</li>
+      <li><strong>README viewer</strong> that pulls <code>README.md</code> straight from GitHub.</li>
+      <li><strong>Install and update pipeline</strong> for <code>.koplugin</code> archives and numbered patch files, with SHA comparison.</li>
+      <li><strong>Offline-friendly cache</strong> under <code>data/cache/AppStore</code>, so fetched entries stay readable without a connection.</li>
+      <li><strong>Ignore release</strong> to hide a specific update until a newer one appears.</li>
+      <li><strong>Optional GitHub token</strong> to raise the API rate limit.</li>
+    </ul>
+  </section>
+
+  <section id="install">
+    <h2>Installing the plugin</h2>
+    <ol>
+      <li>Download the latest <a href="https://github.com/omer-faruq/appstore.koplugin/releases" rel="noopener">release</a>.</li>
+      <li>Copy the <code>appstore.koplugin</code> folder into KOReader&rsquo;s plugin directory &mdash;
+        <code>koreader/plugins/</code> on Kobo and Kindle, <code>/sdcard/koreader/plugins/</code> on Android,
+        <code>~/.config/koreader/plugins/</code> on Linux.</li>
+      <li>Restart KOReader.</li>
+      <li>Open <strong>Tools &rarr; App Store</strong>.</li>
+    </ol>
+    <p>Needs KOReader nightly or 2024.12+ and a network connection for downloads.</p>
+  </section>
+
+  <section id="faq">
+    <h2>Frequently asked questions</h2>
+
+    <h3>What is the difference between a plugin and a user patch?</h3>
+    <p>
+      A plugin is a self-contained <code>.koplugin</code> folder that KOReader loads as an add-on. A user
+      patch is a single numbered Lua file (for example <code>2-my-patch.lua</code>) in
+      <code>koreader/patches</code> that changes KOReader&rsquo;s own behaviour at startup. AppStore browses
+      and installs both.
+    </p>
+
+    <h3>Do I need a GitHub token?</h3>
+    <p>
+      No. Anonymous browsing works, but GitHub&rsquo;s search API allows only about 10 requests per minute.
+      Adding a <strong>classic</strong> personal access token (no scopes required) raises that to roughly 30
+      requests per minute. Fine-grained tokens are not supported by GitHub&rsquo;s search API. On this page
+      the token is stored in your browser only; in the plugin it goes into
+      <code>appstore_configuration.lua</code>.
+    </p>
+
+    <h3>Which devices are supported?</h3>
+    <p>
+      Anything that runs KOReader nightly or 2024.12 and newer: Kobo, Kindle, PocketBook, reMarkable,
+      Android, and the Linux, macOS and Windows desktop builds.
+    </p>
+
+    <h3>Does it work offline?</h3>
+    <p>
+      Browsing does. Results and READMEs are cached, so entries fetched earlier stay readable without a
+      connection. Installing and updating still need network access, and a static nightly-built index is
+      used as a fallback when GitHub&rsquo;s API cannot be reached.
+    </p>
+
+    <h3>Is it safe to install community plugins?</h3>
+    <p>
+      Plugins and patches are plain Lua that runs with the same rights as KOReader itself. AppStore only
+      fetches what upstream repositories publish; read the README and the source of anything you install,
+      exactly as you would for any other third-party add-on.
+    </p>
+  </section>
+</div>
+</main>
+
+<footer class="site-footer">
+  <nav aria-label="Project links">
+    <a href="https://github.com/omer-faruq/appstore.koplugin" rel="noopener">Source on GitHub</a>
+    <a href="https://github.com/omer-faruq/appstore.koplugin/releases" rel="noopener">Releases</a>
+    <a href="https://github.com/omer-faruq/appstore.koplugin/issues" rel="noopener">Issues</a>
+    <a href="https://omer-faruq.github.io/koreader-plugin-index/" rel="noopener">Plugin index (by need)</a>
+    <a href="https://koreader.rocks/" rel="noopener">KOReader</a>
+  </nav>
+  <p>
+    KOReader AppStore &mdash; an independent, community project by
+    <a href="https://github.com/omer-faruq" rel="noopener author">omer-faruq</a>, released under the
+    <a href="https://www.gnu.org/licenses/gpl-3.0.html" rel="noopener license">GPL-3.0</a> licence.
+    Not affiliated with the KOReader project or with GitHub.
+  </p>
+</footer>
 
 <!-- Settings Modal -->
 <div class="modal-overlay" id="settingsModal">
@@ -454,7 +699,7 @@ input:focus,select:focus{border-color:var(--accent)}
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
 <script>
 // ─── Storage abstraction (localStorage with memory fallback) ───
 const Storage = (() => {

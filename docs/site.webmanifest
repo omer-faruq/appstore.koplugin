@@ -1,0 +1,15 @@
+{
+  "name": "KOReader AppStore",
+  "short_name": "AppStore",
+  "description": "Browse and install community-created KOReader plugins and user patches.",
+  "start_url": "/appstore.koplugin/",
+  "scope": "/appstore.koplugin/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

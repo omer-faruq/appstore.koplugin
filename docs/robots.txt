@@ -1,0 +1,7 @@
+# Crawlers read robots.txt only from the domain root
+# (https://omer-faruq.github.io/robots.txt), so this copy is informational
+# for anyone browsing the repository.
+User-agent: *
+Allow: /
+
+Sitemap: https://omer-faruq.github.io/appstore.koplugin/sitemap.xml
