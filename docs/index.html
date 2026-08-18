@@ -465,7 +465,7 @@ input:focus,select:focus{border-color:var(--accent)}
     <strong>JavaScript is turned off.</strong> The live catalogue is fetched from the GitHub API in your
     browser, so the list above stays empty without it. You can still read the overview below, or browse the
     pre-built catalogue at
-    <a href="https://omer-faruq.github.io/koreader-plugin-index/">the KOReader plugin index</a>
+    <a href="https://omer-faruq.github.io/koreader-plugin-index/">the KOReader plugin finder</a>
     and the source at
     <a href="https://github.com/omer-faruq/appstore.koplugin">github.com/omer-faruq/appstore.koplugin</a>.
   </div>
@@ -886,7 +886,7 @@ function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>
 const PLUGIN_INDEX_URL = 'https://omer-faruq.github.io/koreader-plugin-index/';
 function pluginIndexHint(style) {
   return `<p style="margin-top:.75rem;${style || ''}">In the meantime you can browse the static `
-    + `<a href="${PLUGIN_INDEX_URL}" target="_blank" rel="noopener">KOReader Plugin Index</a>`
+    + `<a href="${PLUGIN_INDEX_URL}" target="_blank" rel="noopener">KOReader Plugin Finder</a>`
     + ` — it needs no GitHub API requests, so it works even while the limit is exhausted.</p>`;
 }
 
@@ -1150,7 +1150,7 @@ const app = {
       if (banner) {
         // Point at the static plugin index so a hard failure (rate limit, no
         // network) still leaves the user somewhere to go.
-        banner.innerHTML = `${esc(msg)} <a href="${PLUGIN_INDEX_URL}" target="_blank" rel="noopener">Browse the static KOReader Plugin Index instead →</a>`;
+        banner.innerHTML = `${esc(msg)} <a href="${PLUGIN_INDEX_URL}" target="_blank" rel="noopener">Browse the static KOReader Plugin Finder instead →</a>`;
         banner.classList.add('visible');
         setTimeout(() => banner.classList.remove('visible'), 20000);
       } else {
