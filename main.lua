@@ -6065,6 +6065,15 @@ function AppStore:installPluginFromReleaseAsset(repo, release, asset)
         if self.pending_install_context and self.pending_install_context.mode == "update" then
             local ctx_plugin = self.pending_install_context.plugin
             if ctx_plugin and ctx_plugin.dirname and ctx_plugin.dirname ~= "" then
+                -- Log a warning when the archive-detected dirname differs from the
+                -- recorded one.  The recorded dirname is kept (it is where the user
+                -- originally installed the plugin), but a mismatch signals that the
+                -- install record may have been wrong from the start.
+                if info.plugin_dirname and info.plugin_dirname ~= ctx_plugin.dirname then
+                    logger.warn("appstore: update dirname mismatch – record says",
+                        ctx_plugin.dirname, "but archive says", info.plugin_dirname,
+                        "– keeping record value")
+                end
                 info.plugin_dirname = ctx_plugin.dirname
             end
         end
@@ -8857,7 +8866,10 @@ local function detectPluginFromArchive(reader, repo)
             elseif repo_name then
                 plugin_dirname = sanitizePluginDirname(repo_name)
             else
-                plugin_dirname = sanitizePluginDirname("appstore")
+                -- Fallback: use a generic name instead of "appstore" to avoid
+                -- silently overwriting the AppStore plugin directory when
+                -- archive structure is unexpected.
+                plugin_dirname = sanitizePluginDirname("plugin")
             end
         end
     elseif (not plugin_name or plugin_name == "") then
@@ -8954,6 +8966,23 @@ extractPluginToUserDir = function(reader, info, dest_root)
     dest_root = dest_root or PluginPaths.getDefaultPluginsRoot()
     util.makePath(dest_root)
     local target_dir = dest_root .. "/" .. info.plugin_dirname
+
+    -- Guard against directory name collision: if the target directory already
+    -- contains a _meta.lua with a different plugin name, refuse to overwrite
+    -- it.  This prevents a misidentified archive (e.g. a fallback that guessed
+    -- the wrong plugin_dirname) from silently clobbering an unrelated plugin.
+    local existing_meta_path = target_dir .. "/_meta.lua"
+    if lfs.attributes(existing_meta_path, "mode") == "file" then
+        local ok_meta, existing_meta = pcall(dofile, existing_meta_path)
+        if ok_meta and type(existing_meta) == "table" and existing_meta.name
+            and info.plugin_name and info.plugin_name ~= ""
+            and existing_meta.name ~= info.plugin_name
+            and existing_meta.name ~= (info.plugin_dirname or ""):gsub("%.koplugin$", "") then
+            return false, string.format(
+                _("Directory '%s' already contains plugin '%s', refusing to overwrite with '%s'."),
+                info.plugin_dirname, existing_meta.name, info.plugin_name)
+        end
+    end
 
     -- Collect the set of relative paths coming from the archive so we can
     -- remove only those files before extraction.  Files that exist locally
@@ -9269,6 +9298,11 @@ function AppStore:_installPluginFromRepoInternal(repo)
     if self.pending_install_context and self.pending_install_context.mode == "update" then
         local ctx_plugin = self.pending_install_context.plugin
         if ctx_plugin and ctx_plugin.dirname and ctx_plugin.dirname ~= "" then
+            if info.plugin_dirname and info.plugin_dirname ~= ctx_plugin.dirname then
+                logger.warn("appstore: update dirname mismatch – record says",
+                    ctx_plugin.dirname, "but archive says", info.plugin_dirname,
+                    "– keeping record value")
+            end
             info.plugin_dirname = ctx_plugin.dirname
         end
     end
