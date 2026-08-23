@@ -76,6 +76,7 @@ local PATCH_CACHE_TTL = 10 * 60
 local DEFAULT_SORT_MODE = "stars_desc"
 
 local PluginPaths = require("appstore_plugin_paths")
+local InstallHelpers = require("appstore_install_helpers")
 local PATCHES_ROOT = DataStorage:getDataDir() .. "/patches"
 
 local AppStore = WidgetContainer:extend{
@@ -4079,6 +4080,37 @@ local function getRecordedInstall(dirname)
     return InstallStore.get(dirname)
 end
 
+-- Validate and return the pending update context, but ONLY when it was created
+-- for the repository we are actually about to install. AppStore parks the
+-- context on `self` from the moment the user starts an update until the install
+-- completes; if that update is abandoned (cancelled prompt, network failure,
+-- bad archive) the context survives and would otherwise hijack the NEXT install
+-- of an unrelated plugin. We neutralize that leak by comparing the context's
+-- recorded repository against the one being installed, and discarding the
+-- context when they do not match.
+function AppStore:validatedPendingUpdateContext(repo, owner_override)
+    local ctx = self.pending_install_context
+    if not ctx or ctx.mode ~= "update" or not ctx.plugin then
+        return nil
+    end
+    local ctx_plugin = ctx.plugin
+    local rec = getRecordedInstall(ctx_plugin.dirname)
+    local ctx_repo = rec and rec.repo
+    local ctx_owner = rec and rec.owner
+    local target_repo = repo and repo.name
+    local target_owner = owner_override or (repo and repo.owner)
+    local repo_ok = ctx_repo and target_repo and ctx_repo == target_repo
+    local owner_ok = (not ctx_owner) or (not target_owner) or (ctx_owner == target_owner)
+    if repo_ok and owner_ok then
+        return ctx_plugin
+    end
+    logger.warn("AppStore: discarding stale pending_install_context for "
+        .. tostring(ctx_owner) .. "/" .. tostring(ctx_repo)
+        .. " before installing " .. tostring(target_owner) .. "/" .. tostring(target_repo))
+    self.pending_install_context = nil
+    return nil
+end
+
 function AppStore:updateInstallRecord(dirname, fields)
     if not dirname or dirname == "" or type(fields) ~= "table" then
         return
@@ -6062,20 +6094,27 @@ function AppStore:installPluginFromReleaseAsset(repo, release, asset)
             info.plugin_release_tag = release.tag_name
         end
 
-        if self.pending_install_context and self.pending_install_context.mode == "update" then
-            local ctx_plugin = self.pending_install_context.plugin
-            if ctx_plugin and ctx_plugin.dirname and ctx_plugin.dirname ~= "" then
-                -- Log a warning when the archive-detected dirname differs from the
-                -- recorded one.  The recorded dirname is kept (it is where the user
-                -- originally installed the plugin), but a mismatch signals that the
-                -- install record may have been wrong from the start.
-                if info.plugin_dirname and info.plugin_dirname ~= ctx_plugin.dirname then
-                    logger.warn("appstore: update dirname mismatch – record says",
-                        ctx_plugin.dirname, "but archive says", info.plugin_dirname,
-                        "– keeping record value")
-                end
-                info.plugin_dirname = ctx_plugin.dirname
+        local update_ctx_plugin = self:validatedPendingUpdateContext(repo)
+        if update_ctx_plugin and update_ctx_plugin.dirname and update_ctx_plugin.dirname ~= "" then
+            -- The recorded directory must agree with what the archive actually
+            -- contains. A disagreement means the install record is wrong (or
+            -- the context leaked); refuse to overwrite rather than silently
+            -- clobber the wrong directory.
+            if (info.plugin_dirname or ""):lower() ~= (update_ctx_plugin.dirname or ""):lower() then
+                logger.warn("AppStore: update dirname mismatch - archive contains '"
+                    .. tostring(info.plugin_dirname) .. "' but install record says '"
+                    .. tostring(update_ctx_plugin.dirname) .. "' - aborting install")
+                reader:close()
+                util.removeFile(zip_path)
+                UIManager:show(InfoMessage:new{
+                    text = string.format(
+                        _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
+                        info.plugin_dirname, update_ctx_plugin.dirname),
+                    timeout = 6,
+                })
+                return
             end
+            info.plugin_dirname = update_ctx_plugin.dirname
         end
 
         local function proceedWithInstall(dest_root)
@@ -8967,21 +9006,42 @@ extractPluginToUserDir = function(reader, info, dest_root)
     util.makePath(dest_root)
     local target_dir = dest_root .. "/" .. info.plugin_dirname
 
-    -- Guard against directory name collision: if the target directory already
-    -- contains a _meta.lua with a different plugin name, refuse to overwrite
-    -- it.  This prevents a misidentified archive (e.g. a fallback that guessed
-    -- the wrong plugin_dirname) from silently clobbering an unrelated plugin.
-    local existing_meta_path = target_dir .. "/_meta.lua"
-    if lfs.attributes(existing_meta_path, "mode") == "file" then
-        local ok_meta, existing_meta = pcall(dofile, existing_meta_path)
-        if ok_meta and type(existing_meta) == "table" and existing_meta.name
-            and info.plugin_name and info.plugin_name ~= ""
-            and existing_meta.name ~= info.plugin_name
-            and existing_meta.name ~= (info.plugin_dirname or ""):gsub("%.koplugin$", "") then
-            return false, string.format(
-                _("Directory '%s' already contains plugin '%s', refusing to overwrite with '%s'."),
-                info.plugin_dirname, existing_meta.name, info.plugin_name)
+    -- Collision guard: refuse to extract into a directory that already belongs
+    -- to a different plugin. This is the last line of defense against a
+    -- misidentified archive (e.g. the detection fallback guessing the wrong
+    -- directory name) silently clobbering an unrelated plugin. The decision
+    -- logic lives in appstore_install_helpers so it can be unit-tested.
+    local existing_meta = loadPluginMeta(dest_root, info.plugin_dirname)
+    local existing_name = existing_meta and existing_meta.name
+    local collision_reason
+    if existing_meta then
+        collision_reason = InstallHelpers.decideCollision(existing_name, info.plugin_dirname, info.plugin_name)
+    else
+        -- A _meta.lua exists but could not be read: refuse rather than risk
+        -- clobbering an unidentified plugin. (loadPluginMeta returns nil both
+        -- when the file is absent and when it fails to parse; only treat the
+        -- absent case as safe.)
+        local meta_path = getPluginMetaPath(dest_root, info.plugin_dirname)
+        if meta_path and lfs.attributes(meta_path, "mode") == "file" then
+            collision_reason = "unreadable_meta"
         end
+    end
+    if collision_reason then
+        local collision_msg
+        if collision_reason == "occupied_by_other" then
+            collision_msg = string.format(
+                _("Directory '%s' already contains plugin '%s'; refusing to overwrite it with '%s'."),
+                info.plugin_dirname, existing_name, info.plugin_name)
+        elseif collision_reason == "unknown_name_clash" then
+            collision_msg = string.format(
+                _("Directory '%s' already contains plugin '%s'; refusing to overwrite it because the archive did not identify its plugin name."),
+                info.plugin_dirname, existing_name)
+        else
+            collision_msg = string.format(
+                _("Directory '%s' already contains a plugin whose metadata could not be read; refusing to overwrite it."),
+                info.plugin_dirname)
+        end
+        return false, collision_msg
     end
 
     -- Collect the set of relative paths coming from the archive so we can
@@ -9295,16 +9355,23 @@ function AppStore:_installPluginFromRepoInternal(repo)
     -- When updating from the plugin updates screen, keep the existing
     -- plugin directory name instead of deriving a new one from the
     -- archive or repository metadata.
-    if self.pending_install_context and self.pending_install_context.mode == "update" then
-        local ctx_plugin = self.pending_install_context.plugin
-        if ctx_plugin and ctx_plugin.dirname and ctx_plugin.dirname ~= "" then
-            if info.plugin_dirname and info.plugin_dirname ~= ctx_plugin.dirname then
-                logger.warn("appstore: update dirname mismatch – record says",
-                    ctx_plugin.dirname, "but archive says", info.plugin_dirname,
-                    "– keeping record value")
-            end
-            info.plugin_dirname = ctx_plugin.dirname
+    local update_ctx_plugin = self:validatedPendingUpdateContext(repo, owner)
+    if update_ctx_plugin and update_ctx_plugin.dirname and update_ctx_plugin.dirname ~= "" then
+        if (info.plugin_dirname or ""):lower() ~= (update_ctx_plugin.dirname or ""):lower() then
+            logger.warn("AppStore: update dirname mismatch - archive contains '"
+                .. tostring(info.plugin_dirname) .. "' but install record says '"
+                .. tostring(update_ctx_plugin.dirname) .. "' - aborting install")
+            reader:close()
+            util.removeFile(zip_path)
+            UIManager:show(InfoMessage:new{
+                text = string.format(
+                    _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
+                    info.plugin_dirname, update_ctx_plugin.dirname),
+                timeout = 6,
+            })
+            return
         end
+        info.plugin_dirname = update_ctx_plugin.dirname
     end
 
     local function proceedWithInstall(dest_root)
