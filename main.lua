@@ -4164,8 +4164,10 @@ function AppStore:resolveUpdateDirname(info, update_ctx_plugin)
     end
     -- Directories differ. Check whether the recorded directory actually holds
     -- a different plugin (a real conflict) or just the same plugin under a
-    -- different folder name (a benign mismatch).
-    local plugins_root = PluginPaths.getDefaultPluginsRoot()
+    -- different folder name (a benign mismatch). Probe the recorded directory
+    -- under the context's own install root (falling back to the default
+    -- plugins root), not an unrelated default.
+    local plugins_root = update_ctx_plugin.root or PluginPaths.getDefaultPluginsRoot()
     local recorded_meta = loadPluginMeta(plugins_root, recorded)
     local recorded_name = recorded_meta and getPluginDisplayName(recorded_meta, recorded)
     local archive_name = info.plugin_name
@@ -4184,6 +4186,57 @@ function AppStore:resolveUpdateDirname(info, update_ctx_plugin)
     -- The recorded directory holds a different plugin, or we cannot tell: let
     -- the user decide rather than blindly overwriting or dead-ending.
     return "confirm:" .. tostring(info.plugin_dirname)
+end
+
+-- Present the directory-name conflict to the user and let them choose how to
+-- proceed. IMPORTANT: the archive `reader` and the on-disk `zip_path` are kept
+-- open/alive until the user actually decides. We only close+remove them in the
+-- explicit "Cancel install" branch; the two install branches reuse them.
+--
+-- `dest_root` is the recorded plugin's install root (from the update context);
+-- it must be passed through so the recorded-directory install lands in the
+-- right place (and records the right owner/repo).
+function AppStore:showDirnameConflictDialog(info, reader, zip_path, archive_dir, recorded_dir, dest_root, repo)
+    local dialog
+    local function cleanupAndClose()
+        reader:close()
+        util.removeFile(zip_path)
+        if dialog then
+            UIManager:close(dialog)
+        end
+    end
+    dialog = ConfirmBox:new{
+        text = string.format(
+            _("The archive contains '%s' but your install record says '%s'. Which directory should be used?"),
+            archive_dir, recorded_dir),
+        -- Dismiss must NOT trigger an install: require an explicit choice.
+        dismissable = false,
+        ok_text = string.format(_("Use '%s'"), archive_dir),
+        ok_callback = function()
+            -- Install into the archive's directory.
+            info.plugin_dirname = archive_dir
+            cleanupAndClose()
+            self:_installExtractedPlugin(reader, info, zip_path, dest_root, repo)
+        end,
+        cancel_text = string.format(_("Keep '%s'"), recorded_dir),
+        cancel_callback = function()
+            -- Keep the recorded directory (original policy).
+            info.plugin_dirname = recorded_dir
+            cleanupAndClose()
+            self:_installExtractedPlugin(reader, info, zip_path, dest_root, repo)
+        end,
+        other_buttons = {
+            {
+                {
+                    text = _("Cancel install"),
+                    callback = function()
+                        cleanupAndClose()
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
 end
 
 function AppStore:updateInstallRecord(dirname, fields)
@@ -6136,6 +6189,7 @@ function AppStore:_installExtractedPlugin(reader, info, zip_path, dest_root, rep
     util.removeFile(zip_path)
 
     if not ok_extract then
+        UIManager:close(install_progress)
         UIManager:show(InfoMessage:new{ text = _("Installation failed: ") .. tostring(dest_or_err), timeout = 6 })
         return
     end
@@ -6222,46 +6276,13 @@ function AppStore:installPluginFromReleaseAsset(repo, release, asset)
 
         local update_ctx_plugin = self:validatedPendingUpdateContext(repo)
         local dir_decision = self:resolveUpdateDirname(info, update_ctx_plugin)
-        if dir_decision == "abort" then
-            reader:close()
-            util.removeFile(zip_path)
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
-                    info.plugin_dirname, update_ctx_plugin.dirname),
-                timeout = 6,
-            })
-            return
-        elseif dir_decision:sub(1, 8) == "confirm:" then
+        if dir_decision:sub(1, 8) == "confirm:" then
             local archive_dir = dir_decision:sub(9)
             local recorded_dir = update_ctx_plugin.dirname
-            reader:close()
-            util.removeFile(zip_path)
-            UIManager:show(ConfirmBox:new{
-                text = string.format(
-                    _("The archive contains '%s' but your install record says '%s'. Which directory should be used?"),
-                    archive_dir, recorded_dir),
-                ok_text = string.format(_("Use '%s'"), archive_dir),
-                cancel_text = string.format(_("Keep '%s'"), recorded_dir),
-                other_buttons = {
-                    {
-                        text = _("Cancel install"),
-                        callback = function()
-                            UIManager:close(self._dir_confirm_dialog)
-                        end,
-                    },
-                },
-                callback = function()
-                    -- Install into the archive's directory.
-                    info.plugin_dirname = archive_dir
-                    self:_installExtractedPlugin(reader, info, zip_path, nil, repo)
-                end,
-                cancel_callback = function()
-                    -- Keep the recorded directory (original policy).
-                    info.plugin_dirname = recorded_dir
-                    self:_installExtractedPlugin(reader, info, zip_path, nil, repo)
-                end,
-            })
+            local dest_root = self.pending_install_context
+                and self.pending_install_context.plugin
+                and self.pending_install_context.plugin.root
+            self:showDirnameConflictDialog(info, reader, zip_path, archive_dir, recorded_dir, dest_root, repo)
             return
         end
 
@@ -9474,44 +9495,13 @@ function AppStore:_installPluginFromRepoInternal(repo)
     -- recorded directory genuinely holds a different plugin.
     local update_ctx_plugin = self:validatedPendingUpdateContext(repo, owner)
     local dir_decision = self:resolveUpdateDirname(info, update_ctx_plugin)
-    if dir_decision == "abort" then
-        reader:close()
-        util.removeFile(zip_path)
-        UIManager:show(InfoMessage:new{
-            text = string.format(
-                _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
-                info.plugin_dirname, update_ctx_plugin.dirname),
-            timeout = 6,
-        })
-        return
-    elseif dir_decision:sub(1, 8) == "confirm:" then
+    if dir_decision:sub(1, 8) == "confirm:" then
         local archive_dir = dir_decision:sub(9)
         local recorded_dir = update_ctx_plugin.dirname
-        reader:close()
-        util.removeFile(zip_path)
-        UIManager:show(ConfirmBox:new{
-            text = string.format(
-                _("The archive contains '%s' but your install record says '%s'. Which directory should be used?"),
-                archive_dir, recorded_dir),
-            ok_text = string.format(_("Use '%s'"), archive_dir),
-            cancel_text = string.format(_("Keep '%s'"), recorded_dir),
-            other_buttons = {
-                {
-                    text = _("Cancel install"),
-                    callback = function()
-                        UIManager:close(self._dir_confirm_dialog)
-                    end,
-                },
-            },
-            callback = function()
-                info.plugin_dirname = archive_dir
-                self:_installExtractedPlugin(reader, info, zip_path, nil)
-            end,
-            cancel_callback = function()
-                info.plugin_dirname = recorded_dir
-                self:_installExtractedPlugin(reader, info, zip_path, nil)
-            end,
-        })
+        local dest_root = self.pending_install_context
+            and self.pending_install_context.plugin
+            and self.pending_install_context.plugin.root
+        self:showDirnameConflictDialog(info, reader, zip_path, archive_dir, recorded_dir, dest_root, repo)
         return
     end
 
