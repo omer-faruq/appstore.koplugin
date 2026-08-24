@@ -377,4 +377,11 @@ return {
     ["Download source updated to %s."] = "İndirme kaynağı %s olarak güncellendi.",
     ["This mirror uses plain http://. The connection is not encrypted, so the plugin code downloaded through it could be altered on the way. Use it anyway?"] = "Bu ayna şifresiz http:// kullanıyor. Bağlantı şifrelenmediği için buradan inen eklenti kodu yolda değiştirilebilir. Yine de kullanılsın mı?",
     ["Use it"] = "Kullan",
+    ["Directory '%s' already contains plugin '%s'; refusing to overwrite it with '%s'."] = "'%s' klasöründe zaten '%s' eklentisi var; '%s' ile üzerine yazılmayacak.",
+    ["Directory '%s' already contains plugin '%s'; refusing to overwrite it because the archive did not identify its plugin name."] = "'%s' klasöründe zaten '%s' eklentisi var; arşiv kendi eklenti adını bildirmediği için üzerine yazılmayacak.",
+    ["Directory '%s' already contains a plugin whose metadata could not be read (the file is corrupt or references modules that are not loadable). Remove the directory manually to allow reinstalling, or choose a different destination."] = "'%s' klasöründe üst verisi okunamayan bir eklenti var (dosya bozuk ya da yüklenemeyen modüllere başvuruyor). Yeniden kurabilmek için klasörü elle silin veya başka bir hedef seçin.",
+    ["The archive contains '%s' but your install record says '%s'. Which directory should be used?"] = "Arşivin içinde '%s' var, ancak kurulum kaydınız '%s' diyor. Hangi klasör kullanılsın?",
+    ["Use '%s'"] = "'%s' kullan",
+    ["Keep '%s'"] = "'%s' kalsın",
+    ["Cancel install"] = "Kurulumu iptal et",
 }

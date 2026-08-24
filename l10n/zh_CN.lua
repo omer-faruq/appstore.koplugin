@@ -377,4 +377,11 @@ return {
     ["Save"] = "保存",
     ["This mirror uses plain http://. The connection is not encrypted, so the plugin code downloaded through it could be altered on the way. Use it anyway?"] = "该镜像使用明文 http://。连接未加密，通过它下载的插件代码可能在传输途中被篡改。仍要使用吗？",
     ["Use it"] = "仍要使用",
+    ["The archive contains '%s' but your install record says '%s'. Which directory should be used?"] = "压缩包中的目录为「%s」，但安装记录为「%s」。应使用哪个目录？",
+    ["Use '%s'"] = "使用「%s」",
+    ["Keep '%s'"] = "保留「%s」",
+    ["Cancel install"] = "取消安装",
+    ["Directory '%s' already contains plugin '%s'; refusing to overwrite it with '%s'."] = "目录「%s」中已存在插件「%s」，已拒绝用「%s」覆盖。",
+    ["Directory '%s' already contains plugin '%s'; refusing to overwrite it because the archive did not identify its plugin name."] = "目录「%s」中已存在插件「%s」，因压缩包未标明其插件名称，已拒绝覆盖。",
+    ["Directory '%s' already contains a plugin whose metadata could not be read (the file is corrupt or references modules that are not loadable). Remove the directory manually to allow reinstalling, or choose a different destination."] = "目录「%s」中的插件元数据无法读取（文件已损坏，或引用了无法加载的模块）。请手动删除该目录以便重新安装，或另选安装位置。",
 }
