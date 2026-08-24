@@ -3811,6 +3811,14 @@ function AppStore:updatePluginFromRecord(record)
     self.pending_install_context = {
         mode = "update",
         plugin = plugin,
+        -- Stamp the repository identity here, from the descriptor we already
+        -- have in hand, so validation later reads a single source of truth
+        -- rather than re-deriving it from the (possibly incomplete) install
+        -- record. `repo`/`owner` may be nil for descriptors built from a record
+        -- that lacked them; validatedPendingUpdateContext falls back to the
+        -- record in that case.
+        repo = descriptor and descriptor.name,
+        owner = descriptor and descriptor.owner,
     }
     self:promptPluginInstallOptions(descriptor)
 end
@@ -4094,11 +4102,23 @@ function AppStore:validatedPendingUpdateContext(repo, owner_override)
         return nil
     end
     local ctx_plugin = ctx.plugin
-    local rec = getRecordedInstall(ctx_plugin.dirname)
-    local ctx_repo = rec and rec.repo
-    local ctx_owner = rec and rec.owner
+    -- Identity comes from the context itself (stamped at creation time from the
+    -- descriptor), falling back to the install record only when the stamp is
+    -- missing. This avoids depending on how complete the stored record happens
+    -- to be.
+    local ctx_repo = ctx.repo
+    local ctx_owner = ctx.owner
+    if not ctx_repo or not ctx_owner then
+        local rec = getRecordedInstall(ctx_plugin.dirname)
+        ctx_repo = ctx_repo or (rec and rec.repo)
+        ctx_owner = ctx_owner or (rec and rec.owner)
+    end
     local target_repo = repo and repo.name
-    local target_owner = owner_override or (repo and repo.owner)
+    -- Resolve the target owner the same way in both install paths (release
+    -- asset and zipball), so the comparison is symmetric.
+    local target_owner = owner_override
+        or (repo and repo.owner)
+        or (repo and repo.data and repo.data.owner and repo.data.owner.login)
     local repo_ok = ctx_repo and target_repo and ctx_repo == target_repo
     local owner_ok = (not ctx_owner) or (not target_owner) or (ctx_owner == target_owner)
     if repo_ok and owner_ok then
@@ -4109,6 +4129,61 @@ function AppStore:validatedPendingUpdateContext(repo, owner_override)
         .. " before installing " .. tostring(target_owner) .. "/" .. tostring(target_repo))
     self.pending_install_context = nil
     return nil
+end
+
+-- Resolve the installation directory for an update.
+--
+-- The recorded directory (from the install record / update context) and the
+-- directory derived from the freshly downloaded archive can legitimately
+-- differ: e.g. the first install came from a release asset (whose filename
+-- becomes the directory name) while an update goes through the zipball path
+-- (whose directory is derived from `_meta.name`). That mismatch is the
+-- EXPECTED case, not an error, so we must not hard-abort.
+--
+-- We instead delegate the decision to the collision guard: if the recorded
+-- directory holds the SAME plugin, we keep the recorded directory name (the
+-- original policy) and proceed; if it holds a DIFFERENT plugin, that is a real
+-- conflict and we surface a ConfirmBox letting the user choose.
+--
+-- Returns one of:
+--   "proceed"        - safe to continue (info.plugin_dirname already set to the
+--                       recorded dirname)
+--   "abort"          - the archive genuinely targets a different plugin than the
+--                       recorded directory; the caller should stop.
+--   "confirm:<dir>"  - need a user decision; <dir> is the archive's dirname to
+--                       offer as an alternative.
+function AppStore:resolveUpdateDirname(info, update_ctx_plugin)
+    if not update_ctx_plugin or not update_ctx_plugin.dirname or update_ctx_plugin.dirname == "" then
+        return "proceed"
+    end
+    local recorded = update_ctx_plugin.dirname
+    if (info.plugin_dirname or ""):lower() == recorded:lower() then
+        -- Already consistent: keep the recorded name.
+        info.plugin_dirname = recorded
+        return "proceed"
+    end
+    -- Directories differ. Check whether the recorded directory actually holds
+    -- a different plugin (a real conflict) or just the same plugin under a
+    -- different folder name (a benign mismatch).
+    local plugins_root = PluginPaths.getDefaultPluginsRoot()
+    local recorded_meta = loadPluginMeta(plugins_root, recorded)
+    local recorded_name = recorded_meta and getPluginDisplayName(recorded_meta, recorded)
+    local archive_name = info.plugin_name
+        or (info.plugin_dirname or ""):gsub("%.koplugin$", "")
+    if recorded_name
+        and archive_name
+        and archive_name ~= ""
+        and InstallHelpers.normalizePluginKey(recorded_name) == InstallHelpers.normalizePluginKey(archive_name) then
+        -- Same plugin, different folder name: keep the recorded directory, as
+        -- the original code intended.
+        logger.warn("AppStore: update dirname differs but same plugin - keeping recorded '"
+            .. tostring(recorded) .. "' (archive says '" .. tostring(info.plugin_dirname) .. "')")
+        info.plugin_dirname = recorded
+        return "proceed"
+    end
+    -- The recorded directory holds a different plugin, or we cannot tell: let
+    -- the user decide rather than blindly overwriting or dead-ending.
+    return "confirm:" .. tostring(info.plugin_dirname)
 end
 
 function AppStore:updateInstallRecord(dirname, fields)
@@ -5732,7 +5807,11 @@ function AppStore:promptPluginInstallOptions(repo, release_override)
         do
             local installed_ver = nil
             local installed_tag = nil
-            local ctx_plugin = self.pending_install_context and self.pending_install_context.plugin
+            -- Only trust the pending context if it actually belongs to the
+            -- repository we are about to install; otherwise validatedPending
+            -- UpdateContext discards the stale context (same leak guard as the
+            -- install paths).
+            local ctx_plugin = self:validatedPendingUpdateContext(repo, owner)
             if ctx_plugin then
                 installed_ver = ctx_plugin.version
                 local ctx_rec = InstallStore.get(ctx_plugin.dirname)
@@ -5765,7 +5844,9 @@ function AppStore:promptPluginInstallOptions(repo, release_override)
         -- (not when user manually selected a different release), when it's
         -- an update (newer than installed version), and when it's not already ignored.
         if release and release.tag_name and not release_override then
-            local ctx_plugin = self.pending_install_context and self.pending_install_context.plugin
+            -- Same validated lookup as the Full-changelog block: only use the
+            -- pending context when it matches the repo being installed.
+            local ctx_plugin = self:validatedPendingUpdateContext(repo, owner)
             local installed_ver = nil
             if ctx_plugin then
                 installed_ver = ctx_plugin.version
@@ -5783,7 +5864,7 @@ function AppStore:promptPluginInstallOptions(repo, release_override)
             local release_ver = parseVersionFromTag(release.tag_name)
             local is_update = installed_ver and release_ver and isVersionNewer(release_ver, installed_ver)
             local is_ignored = isReleaseIgnored(owner, repo.name, release.tag_name)
-            
+
             if is_update and not is_ignored then
                 table.insert(buttons, {
                     text = _("Ignore this release"),
@@ -6043,6 +6124,51 @@ function AppStore:renderReleaseListPage(repo, releases, page, current_release, f
     UIManager:show(dialog)
 end
 
+-- Shared install step used by both install paths (and by the dirname-mismatch
+-- ConfirmBox callbacks). `reader` is an open archive reader, `zip_path` the
+-- downloaded archive on disk, and `dest_root` the directory the plugin is
+-- extracted into. Closes the reader and removes the zip when done.
+function AppStore:_installExtractedPlugin(reader, info, zip_path, dest_root, repo)
+    local install_progress = InfoMessage:new{ text = _("Installing plugin…"), timeout = 0 }
+    UIManager:show(install_progress)
+    local ok_extract, dest_or_err = extractPluginToUserDir(reader, info, dest_root)
+    reader:close()
+    util.removeFile(zip_path)
+
+    if not ok_extract then
+        UIManager:show(InfoMessage:new{ text = _("Installation failed: ") .. tostring(dest_or_err), timeout = 6 })
+        return
+    end
+
+    UIManager:close(install_progress)
+
+    -- Some plugins' _meta.lua only set `fullname` (often wrapped in _()), so
+    -- plugin_name parsing can come back nil; fall back to the directory name
+    -- to avoid showing "nil" in the success message.
+    info.plugin_name = info.plugin_name or ((info.plugin_dirname or "plugin"):gsub("%.koplugin$", ""))
+    local msg
+    if self.pending_install_context and self.pending_install_context.mode == "update" then
+        if info.plugin_version and info.plugin_version ~= "" then
+            msg = string.format(_("Updated plugin \"%s\" to version %s."), info.plugin_name, info.plugin_version)
+        else
+            msg = string.format(_("Updated plugin \"%s\"."), info.plugin_name)
+        end
+    else
+        if info.plugin_version and info.plugin_version ~= "" then
+            msg = string.format(_("Installed plugin \"%s\" (version %s)."), info.plugin_name, info.plugin_version)
+        else
+            msg = string.format(_("Installed plugin \"%s\"."), info.plugin_name)
+        end
+    end
+
+    showRestartConfirmation(msg)
+
+    self:handlePostInstall(info, repo)
+    if self.updates_menu then
+        self:updateUpdatesDialog()
+    end
+end
+
 function AppStore:installPluginFromReleaseAsset(repo, release, asset)
     if not repo or not asset then
         return
@@ -6095,73 +6221,56 @@ function AppStore:installPluginFromReleaseAsset(repo, release, asset)
         end
 
         local update_ctx_plugin = self:validatedPendingUpdateContext(repo)
-        if update_ctx_plugin and update_ctx_plugin.dirname and update_ctx_plugin.dirname ~= "" then
-            -- The recorded directory must agree with what the archive actually
-            -- contains. A disagreement means the install record is wrong (or
-            -- the context leaked); refuse to overwrite rather than silently
-            -- clobber the wrong directory.
-            if (info.plugin_dirname or ""):lower() ~= (update_ctx_plugin.dirname or ""):lower() then
-                logger.warn("AppStore: update dirname mismatch - archive contains '"
-                    .. tostring(info.plugin_dirname) .. "' but install record says '"
-                    .. tostring(update_ctx_plugin.dirname) .. "' - aborting install")
-                reader:close()
-                util.removeFile(zip_path)
-                UIManager:show(InfoMessage:new{
-                    text = string.format(
-                        _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
-                        info.plugin_dirname, update_ctx_plugin.dirname),
-                    timeout = 6,
-                })
-                return
-            end
-            info.plugin_dirname = update_ctx_plugin.dirname
-        end
-
-        local function proceedWithInstall(dest_root)
-            local install_progress = InfoMessage:new{ text = _("Installing plugin…"), timeout = 0 }
-            UIManager:show(install_progress)
-            local ok_extract, dest_or_err = extractPluginToUserDir(reader, info, dest_root)
+        local dir_decision = self:resolveUpdateDirname(info, update_ctx_plugin)
+        if dir_decision == "abort" then
             reader:close()
             util.removeFile(zip_path)
-
-            if not ok_extract then
-                UIManager:show(InfoMessage:new{ text = _("Installation failed: ") .. tostring(dest_or_err), timeout = 6 })
-                return
-            end
-
-            UIManager:close(install_progress)
-
-            -- Some plugins' _meta.lua only set `fullname` (often wrapped in _()), so
-            -- plugin_name parsing can come back nil; fall back to the directory name
-            -- to avoid showing "nil" in the success message.
-            info.plugin_name = info.plugin_name or ((info.plugin_dirname or "plugin"):gsub("%.koplugin$", ""))
-            local msg
-            if self.pending_install_context and self.pending_install_context.mode == "update" then
-                if info.plugin_version and info.plugin_version ~= "" then
-                    msg = string.format(_("Updated plugin \"%s\" to version %s."), info.plugin_name, info.plugin_version)
-                else
-                    msg = string.format(_("Updated plugin \"%s\"."), info.plugin_name)
-                end
-            else
-                if info.plugin_version and info.plugin_version ~= "" then
-                    msg = string.format(_("Installed plugin \"%s\" (version %s)."), info.plugin_name, info.plugin_version)
-                else
-                    msg = string.format(_("Installed plugin \"%s\"."), info.plugin_name)
-                end
-            end
-
-            showRestartConfirmation(msg)
-
-            self:handlePostInstall(info, repo)
-            if self.updates_menu then
-                self:updateUpdatesDialog()
-            end
+            UIManager:show(InfoMessage:new{
+                text = string.format(
+                    _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
+                    info.plugin_dirname, update_ctx_plugin.dirname),
+                timeout = 6,
+            })
+            return
+        elseif dir_decision:sub(1, 8) == "confirm:" then
+            local archive_dir = dir_decision:sub(9)
+            local recorded_dir = update_ctx_plugin.dirname
+            reader:close()
+            util.removeFile(zip_path)
+            UIManager:show(ConfirmBox:new{
+                text = string.format(
+                    _("The archive contains '%s' but your install record says '%s'. Which directory should be used?"),
+                    archive_dir, recorded_dir),
+                ok_text = string.format(_("Use '%s'"), archive_dir),
+                cancel_text = string.format(_("Keep '%s'"), recorded_dir),
+                other_buttons = {
+                    {
+                        text = _("Cancel install"),
+                        callback = function()
+                            UIManager:close(self._dir_confirm_dialog)
+                        end,
+                    },
+                },
+                callback = function()
+                    -- Install into the archive's directory.
+                    info.plugin_dirname = archive_dir
+                    self:_installExtractedPlugin(reader, info, zip_path, nil, repo)
+                end,
+                cancel_callback = function()
+                    -- Keep the recorded directory (original policy).
+                    info.plugin_dirname = recorded_dir
+                    self:_installExtractedPlugin(reader, info, zip_path, nil, repo)
+                end,
+            })
+            return
         end
 
         if self.pending_install_context and self.pending_install_context.mode == "update" then
-            proceedWithInstall(self.pending_install_context.plugin.root)
+            self:_installExtractedPlugin(reader, info, zip_path, self.pending_install_context.plugin.root, repo)
         else
-            self:resolveNewInstallDestination(proceedWithInstall, function()
+            self:resolveNewInstallDestination(function(dest_root)
+                self:_installExtractedPlugin(reader, info, zip_path, dest_root, repo)
+            end, function()
                 reader:close()
                 util.removeFile(zip_path)
             end)
@@ -9012,7 +9121,12 @@ extractPluginToUserDir = function(reader, info, dest_root)
     -- directory name) silently clobbering an unrelated plugin. The decision
     -- logic lives in appstore_install_helpers so it can be unit-tested.
     local existing_meta = loadPluginMeta(dest_root, info.plugin_dirname)
-    local existing_name = existing_meta and existing_meta.name
+    -- Resolve the existing plugin's display name the same way the rest of the
+    -- file does. `name` is optional in KOReader `_meta.lua` (many stock plugins
+    -- set only `fullname`), so a missing `name` field must NOT be treated as an
+    -- unreadable file. `unreadable_meta` stays reserved for a `_meta.lua` that
+    -- genuinely failed to parse.
+    local existing_name = existing_meta and getPluginDisplayName(existing_meta, info.plugin_dirname)
     local collision_reason
     if existing_meta then
         collision_reason = InstallHelpers.decideCollision(existing_name, info.plugin_dirname, info.plugin_name)
@@ -9038,7 +9152,7 @@ extractPluginToUserDir = function(reader, info, dest_root)
                 info.plugin_dirname, existing_name)
         else
             collision_msg = string.format(
-                _("Directory '%s' already contains a plugin whose metadata could not be read; refusing to overwrite it."),
+                _("Directory '%s' already contains a plugin whose metadata could not be read (the file is corrupt or references modules that are not loadable). Remove the directory manually to allow reinstalling, or choose a different destination."),
                 info.plugin_dirname)
         end
         return false, collision_msg
@@ -9354,75 +9468,59 @@ function AppStore:_installPluginFromRepoInternal(repo)
 
     -- When updating from the plugin updates screen, keep the existing
     -- plugin directory name instead of deriving a new one from the
-    -- archive or repository metadata.
+    -- archive or repository metadata. A mismatch is the expected case (e.g.
+    -- release-asset filename vs zipball _meta.name), not an error, so we
+    -- reconcile it via the collision guard and only ask the user when the
+    -- recorded directory genuinely holds a different plugin.
     local update_ctx_plugin = self:validatedPendingUpdateContext(repo, owner)
-    if update_ctx_plugin and update_ctx_plugin.dirname and update_ctx_plugin.dirname ~= "" then
-        if (info.plugin_dirname or ""):lower() ~= (update_ctx_plugin.dirname or ""):lower() then
-            logger.warn("AppStore: update dirname mismatch - archive contains '"
-                .. tostring(info.plugin_dirname) .. "' but install record says '"
-                .. tostring(update_ctx_plugin.dirname) .. "' - aborting install")
-            reader:close()
-            util.removeFile(zip_path)
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
-                    info.plugin_dirname, update_ctx_plugin.dirname),
-                timeout = 6,
-            })
-            return
-        end
-        info.plugin_dirname = update_ctx_plugin.dirname
-    end
-
-    local function proceedWithInstall(dest_root)
-        local install_progress = InfoMessage:new{
-            text = _("Installing plugin…"),
-            timeout = 0,
-        }
-        UIManager:show(install_progress)
-        local ok_extract, dest_or_err = extractPluginToUserDir(reader, info, dest_root)
+    local dir_decision = self:resolveUpdateDirname(info, update_ctx_plugin)
+    if dir_decision == "abort" then
         reader:close()
         util.removeFile(zip_path)
-
-        if not ok_extract then
-            UIManager:show(InfoMessage:new{
-                text = _("Installation failed: ") .. tostring(dest_or_err),
-                timeout = 6,
-            })
-            return
-        end
-
-        -- Fall back to the directory name if plugin_name came back nil (e.g. a
-        -- _meta.lua that only sets fullname), so we never show "nil".
-        info.plugin_name = info.plugin_name or ((info.plugin_dirname or "plugin"):gsub("%.koplugin$", ""))
-        local msg
-        if self.pending_install_context and self.pending_install_context.mode == "update" then
-            if info.plugin_version and info.plugin_version ~= "" then
-                msg = string.format(_("Updated plugin \"%s\" to version %s."), info.plugin_name, info.plugin_version)
-            else
-                msg = string.format(_("Updated plugin \"%s\"."), info.plugin_name)
-            end
-        else
-            if info.plugin_version and info.plugin_version ~= "" then
-                msg = string.format(_("Installed plugin \"%s\" (version %s)."), info.plugin_name, info.plugin_version)
-            else
-                msg = string.format(_("Installed plugin \"%s\"."), info.plugin_name)
-            end
-        end
-
-        UIManager:close(install_progress)
-        showRestartConfirmation(msg)
-
-        self:handlePostInstall(info, repo)
-        if self.updates_menu then
-            self:updateUpdatesDialog()
-        end
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _("Update aborted: the archive (%s) does not match the installed plugin directory (%s)."),
+                info.plugin_dirname, update_ctx_plugin.dirname),
+            timeout = 6,
+        })
+        return
+    elseif dir_decision:sub(1, 8) == "confirm:" then
+        local archive_dir = dir_decision:sub(9)
+        local recorded_dir = update_ctx_plugin.dirname
+        reader:close()
+        util.removeFile(zip_path)
+        UIManager:show(ConfirmBox:new{
+            text = string.format(
+                _("The archive contains '%s' but your install record says '%s'. Which directory should be used?"),
+                archive_dir, recorded_dir),
+            ok_text = string.format(_("Use '%s'"), archive_dir),
+            cancel_text = string.format(_("Keep '%s'"), recorded_dir),
+            other_buttons = {
+                {
+                    text = _("Cancel install"),
+                    callback = function()
+                        UIManager:close(self._dir_confirm_dialog)
+                    end,
+                },
+            },
+            callback = function()
+                info.plugin_dirname = archive_dir
+                self:_installExtractedPlugin(reader, info, zip_path, nil)
+            end,
+            cancel_callback = function()
+                info.plugin_dirname = recorded_dir
+                self:_installExtractedPlugin(reader, info, zip_path, nil)
+            end,
+        })
+        return
     end
 
     if self.pending_install_context and self.pending_install_context.mode == "update" then
-        proceedWithInstall(self.pending_install_context.plugin.root)
+        self:_installExtractedPlugin(reader, info, zip_path, self.pending_install_context.plugin.root, repo)
     else
-        self:resolveNewInstallDestination(proceedWithInstall, function()
+        self:resolveNewInstallDestination(function(dest_root)
+            self:_installExtractedPlugin(reader, info, zip_path, dest_root, repo)
+        end, function()
             reader:close()
             util.removeFile(zip_path)
         end)

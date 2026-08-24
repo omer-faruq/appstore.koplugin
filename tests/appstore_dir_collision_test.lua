@@ -45,8 +45,7 @@ check("same plugin, dir base matches, name unknown -> nil",
     H.decideCollision("markdownreader", "markdownreader.koplugin", ""), nil)
 -- The archive detector's loose regex can capture a `fullname` (e.g.
 -- "Markdown Reader") instead of the real `name` ("markdownreader"). We must
--- NOT refuse a legitimate update because of that. This is the false-positive
--- Opus flagged in the PR review.
+-- NOT refuse a legitimate update because of that.
 check("same plugin, fullname captured as name -> nil (no false positive)",
     H.decideCollision("markdownreader", "markdownreader.koplugin", "Markdown Reader"), nil)
 
@@ -74,6 +73,27 @@ check("nil existing name -> unreadable_meta",
     H.decideCollision(nil, "x.koplugin", "x"), "unreadable_meta")
 check("empty existing name -> unreadable_meta",
     H.decideCollision("", "x.koplugin", "x"), "unreadable_meta")
+
+-- Caller contract: KOReader `_meta.lua` files often set only `fullname` and no
+-- `name` (38 of 51 stock plugins). The caller resolves the display name with
+-- getPluginDisplayName(meta, dirname) BEFORE calling decideCollision, so a
+-- fullname-only plugin must NOT be refused as unreadable. We emulate that
+-- resolution (dirname basename) here and assert the guard passes.
+local function callerResolveName(meta_name, dirname)
+    -- Mirror of getPluginDisplayName in main.lua.
+    if meta_name and meta_name ~= "" then return meta_name end
+    if dirname and dirname ~= "" then return dirname:gsub("%.koplugin$", "") end
+    return "plugin"
+end
+do
+    local dirname = "coverbrowser.koplugin"
+    local resolved = callerResolveName(nil, dirname)  -- fullname-only plugin
+    check("fullname-only plugin resolves to dir basename -> nil (not unreadable)",
+        H.decideCollision(resolved, dirname, "coverbrowser"), nil)
+    -- With the incoming name also matching the basename -> safe.
+    check("fullname-only plugin, archive agrees -> nil",
+        H.decideCollision(resolved, dirname, "coverbrowser"), nil)
+end
 
 if failures == 0 then
     print("ALL TESTS PASSED")
