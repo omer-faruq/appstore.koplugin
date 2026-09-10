@@ -519,6 +519,80 @@ function Cache.storeRepos(kind, repos, on_progress, should_stop)
     return true
 end
 
+-- Upsert-only write for the incremental refresh: unlike storeRepos, rows for repositories
+-- that are not in `repos` are left untouched instead of being deleted -- only a full refresh
+-- prunes stale entries. An empty list is a legitimate "nothing changed" result here (there is
+-- nothing to delete), so it succeeds trivially instead of being refused.
+-- Returns true once the given repos are written (or immediately, for an empty list); false
+-- when the write was abandoned partway through.
+function Cache.upsertRepos(kind, repos, on_progress, should_stop)
+    if not kind or type(repos) ~= "table" then
+        return false
+    end
+    if #repos == 0 then
+        return true
+    end
+    local total = #repos
+    local fetched_at = os.time()
+    local abandoned = false
+    withConnection(function(conn)
+        conn:exec("BEGIN;")
+        -- repos(repo_id, kind) is UNIQUE, so REPLACE updates the matching row in place
+        -- instead of touching any other repo_id of this kind.
+        local insert_sql = [[INSERT OR REPLACE INTO repos (repo_id, kind, name, owner, full_name, description, stars, language, homepage, fetched_at, pushed_at, created_at, topics, fork, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);]]
+        local stmt = conn:prepare(insert_sql)
+        for index, repo in ipairs(repos) do
+            if on_progress then
+                on_progress(index, total)
+            end
+            if should_stop and should_stop() then
+                stmt:close()
+                conn:exec("ROLLBACK;")
+                abandoned = true
+                logger.dbg("appstore cache: upsert abandoned after", index - 1, "of", total)
+                return
+            end
+            local owner_login = getOwnerLogin(repo.owner)
+            local ok, serialized = pcall(json.encode, repo)
+            local encoded = ""
+            if ok and type(serialized) == "string" then
+                encoded = serialized
+            else
+                logger.warn("appstore cache encode error", serialized)
+            end
+            stmt:bind(
+                normalizeNumber(repo.id),
+                kind,
+                normalizeString(repo.name),
+                owner_login,
+                normalizeString(repo.full_name),
+                normalizeString(repo.description),
+                normalizeNumber(repo.stargazers_count),
+                normalizeString(repo.language),
+                normalizeString(repo.homepage),
+                fetched_at,
+                normalizeString(repo.pushed_at),
+                normalizeString(repo.created_at),
+                joinTopics(repo.topics),
+                repo.fork == true and 1 or 0,
+                encoded
+            )
+            stmt:step()
+            stmt:reset()
+        end
+        stmt:close()
+        conn:exec("COMMIT;")
+    end)
+    if abandoned then
+        return false
+    end
+    -- Rows of this kind no longer all share one fetched_at (the ones just upserted differ
+    -- from the untouched rest), so the cached single value is no longer a valid answer.
+    last_fetched_cache[kind] = nil
+    return true
+end
+
 local function decodeData(raw, context)
     if not raw or raw == "" then
         return nil
@@ -647,9 +721,10 @@ function Cache.getLastFetched(kind)
         return cached or nil
     end
     local value = withConnection(function(conn)
-        -- storeRepos stamps every row of a kind with the same time in one transaction,
-        -- so any row answers this; the kind index finds one without a scan.
-        local stmt = conn:prepare([[SELECT fetched_at FROM repos WHERE kind = ? LIMIT 1;]])
+        -- A full storeRepos stamps every row of a kind with the same time, but an
+        -- incremental upsertRepos only touches the rows it changed -- so MAX, not LIMIT 1,
+        -- is the row that actually answers "when was this kind last written to".
+        local stmt = conn:prepare([[SELECT MAX(fetched_at) FROM repos WHERE kind = ?;]])
         stmt:bind(kind)
         local row = stmt:step()
         local result = row and row[1] or nil

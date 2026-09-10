@@ -75,6 +75,28 @@ local INCLUDE_ZERO_STAR_FORKS_KEY = "include_zero_star_forks"
 local PATCH_CACHE_TTL = 10 * 60
 local DEFAULT_SORT_MODE = "stars_desc"
 
+-- A full refresh re-discovers every repository from scratch (topic + name search over the
+-- whole of GitHub); an incremental one narrows that same search to `pushed:>=` a cutoff date
+-- and merges the (usually tiny) result into the existing cache instead of replacing it. Full
+-- mode still runs on its own schedule -- this only says how many days apart -- so
+-- repositories that quietly drop off the search (renamed, untagged, deleted) still get pruned
+-- eventually; that gap is the tradeoff for the incremental runs being cheap.
+-- min_full_interval_days = 0 is a deliberate escape hatch: an elapsed time of zero days is
+-- always >= a zero-day interval, so isFullRefreshDue is always true and incremental mode
+-- never engages -- i.e. "0 days" reads naturally as "always full".
+-- Kept as one table rather than a run of top-level locals: this file's main chunk is already
+-- close to Lua's 200-local ceiling.
+local REFRESH_SCHEDULE = {
+    full_interval_days_key = "full_refresh_interval_days",
+    lookback_days_key = "incremental_lookback_days",
+    default_full_interval_days = 30,
+    min_full_interval_days = 0,
+    max_full_interval_days = 365,
+    default_lookback_days = 2,
+    min_lookback_days = 0,
+    max_lookback_days = 30,
+}
+
 local PluginPaths = require("appstore_plugin_paths")
 local InstallHelpers = require("appstore_install_helpers")
 local PATCHES_ROOT = DataStorage:getDataDir() .. "/patches"
@@ -7822,7 +7844,7 @@ function AppStore:browserSwitchTab()
     self:showBrowser()
 end
 
-function AppStore:browserRefresh()
+function AppStore:browserRefresh(opts)
     self:ensureBrowserState()
     local kind = self.browser_state.kind or "plugin"
     self:resetBrowserScrollState()
@@ -7838,7 +7860,7 @@ function AppStore:browserRefresh()
             -- what makes the dialog's Back key work), and a yield returns from this call.
             local Trapper = require("ui/trapper")
             Trapper:wrap(function()
-                self:refreshCache(kind)
+                self:refreshCache(kind, opts)
                 self:showBrowser(kind)
                 UIManager:nextTick(function()
                     if self.browser_menu then
@@ -8174,6 +8196,16 @@ function AppStore:showAppStoreSettingsDialog()
         },
         {
             {
+                text = _("Force full refresh"),
+                background = Blitbuffer.COLOR_WHITE,
+                callback = function()
+                    UIManager:close(dialog)
+                    self:browserRefresh({ force_full = true })
+                end,
+            },
+        },
+        {
+            {
                 text = self:getFilterSummary(),
                 background = Blitbuffer.COLOR_WHITE,
                 callback = function()
@@ -8253,6 +8285,54 @@ function AppStore:showAppStoreSettingsDialog()
             callback = function()
                 UIManager:close(dialog)
                 self:showDownloadSourceDialog()
+            end,
+        },
+    })
+
+    local full_interval_days = self:getFullRefreshIntervalDays()
+    table.insert(buttons, {
+        {
+            text = string.format(_("Full refresh every: %d days"), full_interval_days),
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:show(SpinWidget:new{
+                    title_text = _("Full refresh interval (days)"),
+                    info_text = _("Between full refreshes, checking for updates only searches repositories pushed since the last successful check. Set to 0 to always do a full refresh."),
+                    value = full_interval_days,
+                    value_min = REFRESH_SCHEDULE.min_full_interval_days,
+                    value_max = REFRESH_SCHEDULE.max_full_interval_days,
+                    ok_text = _("Set"),
+                    callback = function(spin)
+                        AppStoreSettings:saveSetting(REFRESH_SCHEDULE.full_interval_days_key, spin.value)
+                        AppStoreSettings:flush()
+                        self:showAppStoreSettingsDialog()
+                    end,
+                })
+            end,
+        },
+    })
+
+    local lookback_days = self:getIncrementalLookbackDays()
+    table.insert(buttons, {
+        {
+            text = string.format(_("Incremental lookback: %d days"), lookback_days),
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:show(SpinWidget:new{
+                    title_text = _("Incremental lookback (days)"),
+                    info_text = _("A safety margin subtracted from the last successful check's time, so an update landing right at that moment is never skipped."),
+                    value = lookback_days,
+                    value_min = REFRESH_SCHEDULE.min_lookback_days,
+                    value_max = REFRESH_SCHEDULE.max_lookback_days,
+                    ok_text = _("Set"),
+                    callback = function(spin)
+                        AppStoreSettings:saveSetting(REFRESH_SCHEDULE.lookback_days_key, spin.value)
+                        AppStoreSettings:flush()
+                        self:showAppStoreSettingsDialog()
+                    end,
+                })
             end,
         },
     })
@@ -9927,9 +10007,18 @@ local function exhaustiveSearchAdaptive(base_topic_query, branch_suffix, append,
     end
 end
 
-function AppStore:fetchAndStore(kind, topics, label, name_queries)
+-- `since_ts` (optional) narrows the search to repositories pushed at or after that time --
+-- the incremental mode -- and the result is merged into the cache with Cache.upsertRepos
+-- instead of replacing the whole kind. Returns `count, stored`: `stored` is false only when
+-- the write was refused or abandoned, so a caller can tell "nothing changed" (incremental,
+-- count 0, stored true) apart from "the write failed" (count 0, stored false).
+function AppStore:fetchAndStore(kind, topics, label, name_queries, since_ts)
     local collected = {}
     local seen = {}
+    local since_suffix = ""
+    if since_ts then
+        since_suffix = string.format(" pushed:>=%s", os.date("!%Y-%m-%d", since_ts))
+    end
     -- The search runs until GitHub stops handing out pages, so the total is not known in
     -- advance. What the last refresh found is a good enough yardstick: the ecosystem grows
     -- by a handful of repositories between refreshes, not by a factor.
@@ -9957,6 +10046,7 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries)
         end
         local base_topic_query = table.concat(parts, " ")
         if base_topic_query ~= "" then
+            base_topic_query = base_topic_query .. since_suffix
             -- Non-fork branch (default GitHub behavior excludes forks).
             exhaustiveSearchAdaptive(base_topic_query, NON_FORK_SUFFIX, append, "nonfork")
             -- Fork branch: suffix honors `include_zero_star_forks` server-side.
@@ -9972,8 +10062,9 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries)
         local fork_suffix = include_zero and FORK_ANY_STARS_SUFFIX or FORK_WITH_STARS_SUFFIX
         for _, base_query in ipairs(name_queries) do
             if base_query and base_query ~= "" then
-                exhaustiveSearchAdaptive(base_query, NON_FORK_SUFFIX, append, "nonfork")
-                exhaustiveSearchAdaptive(base_query, fork_suffix, append, "fork")
+                local query = base_query .. since_suffix
+                exhaustiveSearchAdaptive(query, NON_FORK_SUFFIX, append, "nonfork")
+                exhaustiveSearchAdaptive(query, fork_suffix, append, "fork")
             end
         end
     end
@@ -9981,14 +10072,14 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries)
     -- A stopped search has whatever it had; writing it would replace a complete cache with a
     -- partial one. Zero, not #collected: the count means rows stored.
     if self:refreshCancelled() then
-        return 0
+        return 0, false
     end
 
     -- Losing Wi-Fi halfway through a minute-long search would otherwise replace 1479 cached
     -- repositories with the 300 that arrived before it went.
     if AppStore._refresh_search_incomplete then
         logger.warn("AppStore: search incomplete, leaving the", kind, "cache as it was")
-        return 0
+        return 0, false
     end
 
     -- Its own stage, and a long one -- every repository is encoded to JSON on the way in.
@@ -9999,17 +10090,20 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries)
     if AppStore._refresh_progress and not self:refreshCancelled() then
         AppStore._refresh_progress:setTitle(_("Saving to the cache…"))
     end
-    local stored = Cache.storeRepos(kind, collected, function(done, total)
+    local write = since_ts and Cache.upsertRepos or Cache.storeRepos
+    local stored = write(kind, collected, function(done, total)
         self:reportRefreshProgress(done / total)
     end, function()
         return self:refreshCancelled()
     end)
     -- Zero, not #collected: the count means rows stored.
     if not stored then
-        return 0
+        return 0, false
     end
-    AppStore._refresh_wrote_anything = true
-    return #collected
+    if #collected > 0 then
+        AppStore._refresh_wrote_anything = true
+    end
+    return #collected, true
 end
 
 -- Measured on a Kindle 3 with 1475 plugin and 207 patch repositories cached: the plugin
@@ -10027,6 +10121,67 @@ function AppStore:getRefreshExpectedCount(kind)
     local counted = Cache.countRepos and Cache.countRepos(kind) or 0
     -- An empty cache, or one repository, would make the bar jump straight to the end.
     return math.max(tonumber(counted) or 0, 50)
+end
+
+function AppStore:getFullRefreshIntervalDays()
+    local v = tonumber(AppStoreSettings:readSetting(REFRESH_SCHEDULE.full_interval_days_key))
+    if not v or v < REFRESH_SCHEDULE.min_full_interval_days then
+        return REFRESH_SCHEDULE.default_full_interval_days
+    end
+    return math.min(v, REFRESH_SCHEDULE.max_full_interval_days)
+end
+
+function AppStore:getIncrementalLookbackDays()
+    local v = tonumber(AppStoreSettings:readSetting(REFRESH_SCHEDULE.lookback_days_key))
+    if not v or v < REFRESH_SCHEDULE.min_lookback_days then
+        return REFRESH_SCHEDULE.default_lookback_days
+    end
+    return math.min(v, REFRESH_SCHEDULE.max_lookback_days)
+end
+
+-- Per-kind stamps of the last refresh that finished clean, kept in AppStoreSettings rather
+-- than derived from the cache: an upsert only touches some rows, and a failed or cancelled
+-- run must not look like a healthy one the next time this decides between full and
+-- incremental mode. `full_ok_at` only moves on a successful full run; `ok_at` moves on either
+-- kind of success and anchors the next incremental run's `pushed:>=` cutoff.
+function AppStore:getLastFullRefreshOkAt(kind)
+    return tonumber(AppStoreSettings:readSetting("last_full_refresh_ok_at_" .. kind))
+end
+
+function AppStore:getLastRefreshOkAt(kind)
+    return tonumber(AppStoreSettings:readSetting("last_refresh_ok_at_" .. kind))
+end
+
+function AppStore:markRefreshOk(kind, is_full, at)
+    at = at or os.time()
+    AppStoreSettings:saveSetting("last_refresh_ok_at_" .. kind, at)
+    if is_full then
+        AppStoreSettings:saveSetting("last_full_refresh_ok_at_" .. kind, at)
+    end
+    AppStoreSettings:flush()
+end
+
+-- True when `kind` either has never had a successful full refresh, or its last one is older
+-- than the configured interval. `force_full` (the "force full refresh" action) bypasses this
+-- entirely and never needs to call it.
+function AppStore:isFullRefreshDue(kind)
+    local last_full = self:getLastFullRefreshOkAt(kind)
+    if not last_full then
+        return true
+    end
+    return (os.time() - last_full) >= self:getFullRefreshIntervalDays() * 86400
+end
+
+-- The `pushed:>=` cutoff for an incremental run: the last successful refresh of either kind,
+-- minus a buffer, so a repository pushed while the previous run was already reading its
+-- search results is not skipped by a hair. Nil means there is no prior successful refresh at
+-- all, so the caller should fall back to a full run instead.
+function AppStore:getIncrementalSinceTs(kind)
+    local anchor = self:getLastRefreshOkAt(kind) or self:getLastFullRefreshOkAt(kind)
+    if not anchor then
+        return nil
+    end
+    return anchor - self:getIncrementalLookbackDays() * 86400
 end
 
 -- `fraction` is progress within the current phase, 0..1.
@@ -10051,7 +10206,10 @@ function AppStore:refreshCancelled()
     return AppStore._refresh_cancelled == true
 end
 
-function AppStore:refreshCache(kind)
+-- `opts.force_full` (the settings dialog's "Force full refresh" action) always runs a full
+-- discovery search regardless of the configured interval. Otherwise this picks incremental
+-- vs full itself, per kind, from `isFullRefreshDue`.
+function AppStore:refreshCache(kind, opts)
     if self.is_refreshing then
         return
     end
@@ -10067,6 +10225,17 @@ function AppStore:refreshCache(kind)
     local refresh_patches = kind == "patch"
     local refresh_plugins = not refresh_patches
 
+    local force_full = opts and opts.force_full == true
+    local is_full = force_full or self:isFullRefreshDue(kind)
+    local since_ts
+    if not is_full then
+        since_ts = self:getIncrementalSinceTs(kind)
+        if not since_ts then
+            -- No prior successful refresh to anchor an incremental run on.
+            is_full = true
+        end
+    end
+
     self.is_refreshing = true
     AppStore._refresh_search_incomplete = false
     AppStore._refresh_wrote_anything = false
@@ -10078,8 +10247,14 @@ function AppStore:refreshCache(kind)
     self._patch_entries_cache = nil
     AppStore._refresh_cancelled = false
     local AppStoreProgress = require("appstore_progress")
+    local title
+    if refresh_patches then
+        title = is_full and _("Refreshing patches…") or _("Checking for recent patch updates…")
+    else
+        title = is_full and _("Refreshing plugins…") or _("Checking for recent plugin updates…")
+    end
     local progress = AppStoreProgress:new{
-        title = refresh_patches and _("Refreshing patches…") or _("Refreshing plugins…"),
+        title = title,
         stopping_title = _("Stopping…"),
         cancel_callback = function()
             AppStore._refresh_cancelled = true
@@ -10088,7 +10263,11 @@ function AppStore:refreshCache(kind)
     AppStore._refresh_progress = progress
 
     local summary
-    local stored_nothing = false
+    -- True once a write step is refused or abandoned. For a full refresh that is exactly
+    -- "nothing came back" (storeRepos refuses to replace a whole kind with zero rows); for
+    -- an incremental one, an empty result is a healthy "nothing changed" and does not set
+    -- this at all -- see fetchAndStore's `stored` return value.
+    local write_failed = false
     -- Opened before the dialog is shown: a throw in between would leave a modal on screen
     -- with no way to dismiss it, and `is_refreshing` set for the rest of the session.
     local ok, err = pcall(function()
@@ -10099,26 +10278,28 @@ function AppStore:refreshCache(kind)
         local summary_parts = {}
         if refresh_plugins then
             self:beginRefreshPhase(0, 1)
-            local plugin_total = self:fetchAndStore("plugin", PLUGIN_TOPICS, "Plugin", PLUGIN_NAME_QUERIES)
-            stored_nothing = plugin_total == 0
-            table.insert(summary_parts, string.format(_("Cached %s plugins."), tostring(plugin_total)))
+            local plugin_total, plugin_stored = self:fetchAndStore("plugin", PLUGIN_TOPICS, "Plugin", PLUGIN_NAME_QUERIES, since_ts)
+            write_failed = is_full and (plugin_total == 0) or (not plugin_stored)
+            local text = is_full and _("Cached %s plugins.") or _("Updated %s plugins.")
+            table.insert(summary_parts, string.format(text, tostring(plugin_total)))
         end
         if refresh_patches then
             self:beginRefreshPhase(0, AppStore.PATCH_SEARCH_SHARE)
-            local patch_total = self:fetchAndStore("patch", PATCH_TOPICS, "Patch", PATCH_NAME_QUERIES)
-            stored_nothing = patch_total == 0
+            local patch_total, patch_stored = self:fetchAndStore("patch", PATCH_TOPICS, "Patch", PATCH_NAME_QUERIES, since_ts)
+            write_failed = is_full and (patch_total == 0) or (not patch_stored)
             self:beginRefreshPhase(AppStore.PATCH_SEARCH_SHARE, 1 - AppStore.PATCH_SEARCH_SHARE)
             -- Five sixths of a patch refresh, under its own name. Skipped whole after a stop
-            -- (the loop checks too, but only past work nobody is waiting for), and after an
-            -- empty search -- the network is not answering, and 200 trees would burn a
+            -- (the loop checks too, but only past work nobody is waiting for), and after a
+            -- failed search -- the network is not answering, and 200 trees would burn a
             -- timeout apiece before saying so.
-            if not self:refreshCancelled() and not stored_nothing then
+            if not self:refreshCancelled() and not write_failed then
                 if AppStore._refresh_progress then
                     AppStore._refresh_progress:setTitle(_("Fetching patch file lists…"))
                 end
                 self:refreshPatchFileListings()
             end
-            table.insert(summary_parts, string.format(_("Cached %s patch repositories."), tostring(patch_total)))
+            local text = is_full and _("Cached %s patch repositories.") or _("Updated %s patch repositories.")
+            table.insert(summary_parts, string.format(text, tostring(patch_total)))
         end
         summary = table.concat(summary_parts, " ")
         if summary == "" then
@@ -10126,7 +10307,7 @@ function AppStore:refreshCache(kind)
         end
         -- This line lives on in the browser header, so it must not describe a run that did
         -- not finish, nor claim "Cached 0 plugins." over rows that were never replaced.
-        if not self:refreshCancelled() and not stored_nothing then
+        if not self:refreshCancelled() and not write_failed then
             AppStoreSettings:saveSetting("status_text", summary)
             AppStoreSettings:flush()
         end
@@ -10137,6 +10318,14 @@ function AppStore:refreshCache(kind)
     self.is_refreshing = false
     local cancelled = AppStore._refresh_cancelled
     AppStore._refresh_cancelled = false
+
+    -- Stamped last, and only once every earlier step has been confirmed clean: a cancelled,
+    -- thrown, incomplete, or refused run must not read as a healthy refresh the next time
+    -- this decides between full and incremental mode.
+    local healthy = ok and not cancelled and not AppStore._refresh_search_incomplete and not write_failed
+    if healthy then
+        self:markRefreshOk(kind, is_full)
+    end
 
     if cancelled then
         -- The repository list is all or nothing, but the patch file lists are written a
@@ -10152,7 +10341,7 @@ function AppStore:refreshCache(kind)
     elseif AppStore._refresh_search_incomplete then
         -- Not "nothing came back": something did, and that is why the cache was kept.
         UIManager:show(InfoMessage:new{ text = _("The search did not finish. The cache was left as it was."), timeout = 6 })
-    elseif stored_nothing then
+    elseif write_failed then
         UIManager:show(InfoMessage:new{ text = _("Nothing came back from GitHub. The cache was left as it was."), timeout = 5 })
     else
         -- Deliberately silent: the browser reopens right behind this and states the counts
