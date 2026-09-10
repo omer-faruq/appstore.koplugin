@@ -204,6 +204,51 @@ Scope, worth knowing before you switch:
 
 The same setting can also be written in `appstore_configuration.lua` as `download_mirror_preset` / `download_mirror_prefix` (see `appstore_configuration.sample.lua`). The two do not fight: whichever was touched last applies. Pick a source in the UI and it overrides the config file; edit the config file afterwards and it wins again. Removing the key counts as an edit and restores the default. This is how a config file you sync between devices keeps working even after you have poked at the setting on one of them.
 
+## Full vs. Incremental Refresh
+
+**Refresh cache** doesn't always do the same amount of work. A **full** refresh
+re-discovers every repository from scratch (the complete topic + name search across
+GitHub); an **incremental** one narrows that same search to repositories pushed since
+the last successful check and merges the (usually small) result into the existing
+cache instead of replacing it.
+
+### How it decides
+
+- The first refresh ever for a kind (plugins/patches) is always full.
+- After that, a refresh is full only once **Full refresh interval (days)** has elapsed
+  since the last successful full refresh; otherwise it runs incremental.
+- **Force full refresh** (gear icon ⚙️) always runs a full refresh immediately,
+  regardless of the interval.
+- Setting **Full refresh interval (days)** to `0` disables incremental mode entirely —
+  every refresh is full.
+- A refresh that fails, is stopped, or comes back incomplete does not count as
+  successful, so it never gets credit for having refreshed anything — the next refresh
+  still sees the same interval as if it hadn't run.
+
+### What incremental mode catches, and what it doesn't
+
+Incremental mode filters by GitHub's `pushed:` search qualifier (time of the last code
+push), plus an **Incremental lookback (days)** safety margin subtracted from the last
+successful check, so an update landing right at that moment is never skipped. It's
+cheap because it usually returns a handful of repositories instead of the whole
+ecosystem — but that also means it will not notice:
+
+- A repository removed, renamed, or untagged since the last full refresh (there is no
+  full listing to prune it from).
+- A repository whose only change is its star count — GitHub does not move `pushed_at`
+  when someone stars a repo, so incremental mode can't see that change. The cached star
+  count (used for sort order) stays as it was until the next full refresh.
+
+Both gaps close automatically at the next full refresh, so any drift is bounded by the
+configured interval, not permanent.
+
+### Accessing the settings
+
+1. Open the **Plugins** or **Patches** browser.
+2. Tap the **gear icon** (⚙️).
+3. **Full refresh every: N days** and **Incremental lookback: N days** each open a
+   numeric spinner; **Force full refresh** runs one immediately.
+
 ## Troubleshooting
 
 | Symptom | Likely Cause | Suggested Fix |
@@ -211,6 +256,7 @@ The same setting can also be written in `appstore_configuration.lua` as `downloa
 | Rate limit exceeded | Anonymous GitHub quota exhausted | Configure a PAT and retry after a few minutes |
 | Missing README | Repo lacks `README.md` or request failed | Confirm file exists upstream, then rerun **View README** while online |
 | Patch not listed | Repository is not named `KOReader.patches` (or similar) and/or the `koreader-user-patch` topic is missing | Ask the maintainer to add the correct topic |
+| Star count / sort order looks stale | Cache has only been refreshed incrementally since the last full refresh | Wait for the next full refresh, or use **Force full refresh** |
 
 ## Non-touch devices (Kindle 4 NT, Kindle Keyboard, …)
 
@@ -231,9 +277,9 @@ You can also browse the repository list from your PC browser by visiting [https:
 
 The plugin UI can be shown in the language selected in KOReader (**Settings → Language**).
 Bundled translations: Simplified Chinese (`zh_CN`), Turkish (`tr`), Spanish (`es`),
-French (`fr`), German (`de`), Brazilian Portuguese (`pt_BR`), Hungarian (`hu`). Any
-untranslated string falls back to English, and an unsupported language shows the full
-English UI.
+French (`fr`), German (`de`), Brazilian Portuguese (`pt_BR`), Hungarian (`hu`),
+Azerbaijani (`az`). Any untranslated string falls back to English, and an unsupported
+language shows the full English UI.
 
 Translations live in `l10n/<code>.lua`, plain Lua tables mapping the English source
 string to its translation. The plugin loads them through `appstore_gettext.lua`, a
