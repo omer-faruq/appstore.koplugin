@@ -706,7 +706,7 @@ const Storage = (() => {
   let mem = {};
   let hasLS = false;
   try { localStorage.setItem('__test__', '1'); localStorage.removeItem('__test__'); hasLS = true; } catch(e) {}
-  const VOLATILE_PREFIXES = ['readme_', 'tree_'];
+  const VOLATILE_PREFIXES = ['tree_'];
   function evictVolatile() {
     if (!hasLS) return;
     try {
@@ -733,6 +733,70 @@ const Storage = (() => {
     getJSON(k) { const v = this.get(k); if (!v) return null; try { return JSON.parse(v); } catch(e) { return null; } },
     setJSON(k, v) { this.set(k, JSON.stringify(v)); },
     get persistent() { return hasLS; }
+  };
+})();
+
+// ─── README store (IndexedDB) ───
+// READMEs are far too large for localStorage, so they live here, keyed by
+// full_name and validated against the repo's pushed_at: a README cannot change
+// without a push, so a matching record is reused across visits. Every call
+// degrades to a no-op when IndexedDB is unavailable.
+const ReadmeStore = (() => {
+  const MAX_AGE = 30 * 24 * 3600000;
+  const FALLBACK_AGE = 3600000; // when the caller has no pushed_at to compare
+  let dbPromise = null;
+  function open() {
+    if (!dbPromise) {
+      dbPromise = new Promise(resolve => {
+        try {
+          const req = indexedDB.open('appstore', 1);
+          req.onupgradeneeded = () => req.result.createObjectStore('readmes');
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => resolve(null);
+          req.onblocked = () => resolve(null);
+        } catch(e) { resolve(null); }
+      });
+    }
+    return dbPromise;
+  }
+  function run(mode, fn) {
+    return open().then(db => new Promise(resolve => {
+      if (!db) return resolve(null);
+      try {
+        const tx = db.transaction('readmes', mode);
+        const result = fn(tx.objectStore('readmes'));
+        tx.oncomplete = () => resolve(result && 'result' in result ? result.result : null);
+        tx.onerror = tx.onabort = () => resolve(null);
+      } catch(e) { resolve(null); }
+    }));
+  }
+  // Drop the old localStorage copies once; they only ate the list cache's quota.
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('readme_')) localStorage.removeItem(k);
+    }
+  } catch(e) {}
+  return {
+    isFresh(rec, pushedAt) {
+      if (!rec) return false;
+      const age = Date.now() - rec.ts;
+      if (pushedAt) return rec.pushed_at === pushedAt && age < MAX_AGE;
+      return age < FALLBACK_AGE;
+    },
+    get(key) { return run('readonly', s => s.get(key)); },
+    put(key, rec) { return run('readwrite', s => { s.put(rec, key); }); },
+    async getAll() {
+      const map = new Map();
+      await run('readonly', s => {
+        const req = s.openCursor();
+        req.onsuccess = () => {
+          const c = req.result;
+          if (c) { map.set(c.key, c.value); c.continue(); }
+        };
+      });
+      return map;
+    },
   };
 })();
 
@@ -830,11 +894,35 @@ const GitHub = {
     Storage.setJSON(cacheKey, { tree, ts: Date.now() });
     return tree;
   },
-  async fetchReadme(owner, repo) {
-    const cacheKey = `readme_${owner}/${repo}`;
-    const cached = Storage.getJSON(cacheKey);
-    if (cached && cached.content && (Date.now() - cached.ts < 3600000)) return cached.content;
-    const data = await this.request(`/repos/${owner}/${repo}/readme`);
+  // `pushedAt` (from the repo list) lets a stored copy be reused until the repo
+  // is pushed again; `stored` is an already-read ReadmeStore record, if any.
+  async fetchReadme(owner, repo, pushedAt, stored) {
+    const key = `${owner}/${repo}`;
+    const rec = stored !== undefined ? stored : await ReadmeStore.get(key);
+    if (ReadmeStore.isFresh(rec, pushedAt)) {
+      if (rec.missing) throw new Error('GitHub API 404: Not Found');
+      return rec.content;
+    }
+    const save = (content, missing) =>
+      ReadmeStore.put(key, { content, missing, pushed_at: pushedAt || null, ts: Date.now() });
+    // Most repos have a root README.md; raw.githubusercontent.com serves it
+    // without spending API quota. Anything else falls through to the API,
+    // which also finds readme.md, README.rst, etc.
+    try {
+      const res = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/README.md`);
+      if (res.ok) {
+        const content = await res.text();
+        save(content, false);
+        return content;
+      }
+    } catch(e) {}
+    let data;
+    try {
+      data = await this.request(`/repos/${owner}/${repo}/readme`);
+    } catch(e) {
+      if (e.message && e.message.includes('404')) save('', true);
+      throw e;
+    }
     let content = '';
     if (data.content) {
       const bin = atob(data.content.replace(/\n/g, ''));
@@ -842,7 +930,7 @@ const GitHub = {
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       content = new TextDecoder('utf-8').decode(bytes);
     }
-    Storage.setJSON(cacheKey, { content, ts: Date.now() });
+    save(content, false);
     return content;
   },
   async testAuth() {
@@ -1336,20 +1424,27 @@ const app = {
     if (pending.length === 0) return;
     for (const r of pending) this.readmeLoading[r.full_name] = true;
     this.render();
-    const BATCH = 6;
+    // Most fetches go to raw.githubusercontent.com, which is outside the API
+    // quota; the API fallbacks stay well below GitHub's secondary limits
+    // (100 concurrent / ~900 per minute).
+    const CONCURRENCY = 12;
     let done = 0;
     // Collect non-404 errors so we can surface a single, clear alert at the
     // end instead of silently producing a partial README search result set.
     const errors = [];
     const total = pending.length;
     this.showSearchOverlay(`Searching READMEs... (0/${total})`);
-    for (let i = 0; i < pending.length; i += BATCH) {
-      const batch = pending.slice(i, i + BATCH);
-      await Promise.allSettled(batch.map(async repo => {
+    const stored = await ReadmeStore.getAll();
+    const queue = pending.slice();
+    // A worker pool instead of fixed batches, so one slow README never holds
+    // up the others. The list is rendered once by the caller when all finish.
+    const worker = async () => {
+      while (queue.length) {
+        const repo = queue.shift();
         const key = repo.full_name;
         try {
           const [owner, name] = key.split('/');
-          const content = await GitHub.fetchReadme(owner, name);
+          const content = await GitHub.fetchReadme(owner, name, repo.pushed_at, stored.get(key) || null);
           this.readmeCache[key] = content.toLowerCase();
         } catch (e) {
           this.readmeCache[key] = '';
@@ -1362,9 +1457,9 @@ const app = {
         done++;
         const errorCount = errors.length;
         document.getElementById('searchOverlayText').textContent = `Searching READMEs... (${done}/${total}${errorCount ? ', ' + errorCount + ' failed' : ''})`;
-      }));
-      this.render();
-    }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
     // Merge any list-fetch errors that refreshData deferred so the user sees
     // a single combined alert instead of two back-to-back popups.
     let combinedErrors = errors;
@@ -1519,7 +1614,9 @@ const app = {
     modal.classList.add('open');
 
     try {
-      const content = await GitHub.fetchReadme(owner, repo);
+      const full = `${owner}/${repo}`;
+      const listed = (this.data[this.tab] || []).find(r => r.full_name === full);
+      const content = await GitHub.fetchReadme(owner, repo, listed && listed.pushed_at);
       contentEl.innerHTML = md2html(content, owner, repo);
     } catch (e) {
       contentEl.innerHTML = `<div class="state-msg"><p>Failed to load README: ${esc(e.message)}</p></div>`;
