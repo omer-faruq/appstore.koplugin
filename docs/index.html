@@ -880,6 +880,27 @@ function md2html(md, owner, repo) {
 }
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+// ─── Slim repo records ───
+// A full search item is ~5.7 KB, so a large catalogue overflows localStorage's
+// ~5 MB quota and the cache silently falls back to memory. Keep only the fields
+// the page reads; add a field here before using it anywhere else.
+function slimRepo(r) {
+  return {
+    name: r.name,
+    full_name: r.full_name,
+    html_url: r.html_url,
+    description: r.description,
+    fork: r.fork,
+    owner: r.owner ? { login: r.owner.login } : null,
+    stargazers_count: r.stargazers_count,
+    pushed_at: r.pushed_at,
+    created_at: r.created_at,
+    topics: r.topics,
+    language: r.language,
+    license: r.license ? { spdx_id: r.license.spdx_id } : null,
+  };
+}
+
 // ─── Fallback when GitHub's API is unavailable (rate limit / network) ───
 // A static, pre-built plugin index that needs no API calls, so it still works
 // when we cannot talk to GitHub at all.
@@ -1133,7 +1154,9 @@ const app = {
     // can be shown together in a single alert instead of two popups.
     const willReadmeSearch = this.ts.readmeSearch && this.ts.query;
     try {
-      const { repos, errors, totalQueries } = await this.fetchCategory(active);
+      const { repos: fullRepos, errors, totalQueries } = await this.fetchCategory(active);
+      // Slim the in-memory copy too, so fresh and cached data behave identically.
+      const repos = fullRepos.map(slimRepo);
       this.data[active] = repos;
       Storage.setJSON(`cache_${active}`, { repos, ts: Date.now(), withZeroStarForks: this.includeZeroStarForks });
       if (errors && errors.length > 0) {
