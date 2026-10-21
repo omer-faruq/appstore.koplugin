@@ -405,7 +405,7 @@ function AppStore:_refreshPatchUpdatesInternal(records)
         return nil, err
     end
 
-    for _, record in ipairs(records) do
+    for _i, record in ipairs(records) do
         local repo = buildPatchRepoDescriptor(record)
         local entry
         local err
@@ -5539,7 +5539,7 @@ function AppStore:showFullChangelog(owner, repo_desc, installed_version, target_
         local collecting = (target_tag == nil)
         local is_downgrade = false
 
-        for _, rel in ipairs(releases) do
+        for _i, rel in ipairs(releases) do
             local rel_tag = rel.tag_name
 
             -- Downgrade detection: if we hit the installed tag before the
@@ -8990,7 +8990,7 @@ function AppStore:renderRepoLines(descriptors)
         return { _("No cached entries yet. Refresh to fetch from GitHub.") }
     end
     local lines = {}
-    for _, repo in ipairs(descriptors) do
+    for _i, repo in ipairs(descriptors) do
         local badge = string.format("⭐ %s", tostring(repo.stars or 0))
         local fullname = repo.full_name or (repo.owner and repo.name and (repo.owner .. "/" .. repo.name)) or (repo.name or _("Unknown"))
         local raw_description = normalizeDescription(repo.description)
