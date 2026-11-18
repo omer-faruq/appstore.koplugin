@@ -128,12 +128,82 @@ do
 end
 
 do
+    -- Out of requests, yet the reset is already behind us: our clock is ahead of
+    -- GitHub's, and how far is unknown. A whole search window is the safe wait.
     reset({ {
         code = 403, body = "{}",
         headers = { ["x-ratelimit-remaining"] = "0", ["x-ratelimit-reset"] = "1699999990" },
     } })
     local _, err = GitHub.searchRepositories({ q = "x" })
-    check("reset already past: wait at least a second", GitHub.rateLimitDelay(err, 1700000000), 1)
+    check("reset already past: a full window, not a second", GitHub.rateLimitDelay(err, 1700000000), 61)
+end
+
+-- ── GitHub's clock, not the device's ────────────────────────────────────────
+-- 1700000000 is Tue, 14 Nov 2023 22:13:20 GMT.
+do
+    reset({ {
+        code = 403, body = "{}",
+        headers = {
+            ["date"] = "Tue, 14 Nov 2023 22:13:20 GMT",
+            ["x-ratelimit-remaining"] = "0", ["x-ratelimit-reset"] = "1700000050",
+        },
+    } })
+    local _, err = GitHub.searchRepositories({ q = "x" })
+    check("Date header: wait measured on GitHub's clock (device 30 s behind)",
+        GitHub.rateLimitDelay(err, 1700000000 - 30), 51)
+    check("Date header: wait measured on GitHub's clock (device 2 min ahead)",
+        GitHub.rateLimitDelay(err, 1700000000 + 120), 51)
+end
+do
+    -- No Date header, device behind: the search limit resets every minute, so
+    -- never more than a minute's wait for it.
+    reset({ {
+        code = 403, body = "{}",
+        headers = {
+            ["x-ratelimit-resource"] = "search",
+            ["x-ratelimit-remaining"] = "0", ["x-ratelimit-reset"] = "1700000050",
+        },
+    } })
+    local _, err = GitHub.searchRepositories({ q = "x" })
+    check("search limit: never waits past its minute", GitHub.rateLimitDelay(err, 1700000000 - 30), 61)
+end
+do
+    reset({ { code = 200, body = "search", headers = { ["date"] = "Tue, 14 Nov 2023 22:13:20 GMT" } } })
+    local parsed = GitHub.searchRepositories({ q = "x" })
+    check("search response carries GitHub's time", parsed and parsed.server_time, 1700000000)
+end
+
+-- ── A 403 is not always a rate limit ────────────────────────────────────────
+do
+    reset({ {
+        code = 403, body = '{"message":"Resource not accessible"}',
+        headers = { ["x-ratelimit-remaining"] = "27", ["x-ratelimit-reset"] = "1700000041" },
+    } })
+    local _, err = GitHub.searchRepositories({ q = "x" })
+    check("403 with requests left: not a rate limit", err and err.is_rate_limit, false)
+    check("403 with requests left: nothing to wait for", GitHub.rateLimitDelay(err, 1700000000), nil)
+end
+do
+    -- The secondary limit, without Retry-After: GitHub asks for at least a minute.
+    reset({ {
+        code = 403, body = '{"message":"You have exceeded a secondary rate limit."}',
+        headers = { ["x-ratelimit-remaining"] = "27", ["x-ratelimit-reset"] = "1700000041" },
+    } })
+    local _, err = GitHub.searchRepositories({ q = "x" })
+    check("secondary limit: a rate limit", err and err.is_rate_limit, true)
+    check("secondary limit: a minute's wait", GitHub.rateLimitDelay(err, 1700000000), 60)
+end
+
+-- ── Stopping during a retry's wait stops the retries ────────────────────────
+do
+    reset({ { code = 502, body = "{}" }, { code = 502, body = "{}" }, { code = 200, body = "search" } })
+    GitHub.wait = function(seconds)
+        waits[#waits + 1] = seconds
+        return false
+    end
+    local parsed, err = GitHub.searchRepositories({ q = "x" })
+    check("stopped during a retry wait: no further request", #requests, 1)
+    check("stopped during a retry wait: reports the failure", parsed == nil and err and err.code, 502)
 end
 
 if failures > 0 then

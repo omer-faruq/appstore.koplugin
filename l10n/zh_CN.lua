@@ -339,6 +339,7 @@ return {
     ["README download failed: "] = "README 下载失败：",
     ["GitHub API rate limit exceeded. Please wait a few minutes and try again."] = "已超出 GitHub API 速率限制。请稍候几分钟后重试。",
     ["GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min)."] = "已超出 GitHub API 速率限制。请在 AppStore 设置中添加 GitHub 令牌以提高限制（10→30 次/分钟）。",
+    ["GitHub rate limit reached. Continuing in %d s…"] = "已达到 GitHub 速率限制。%d 秒后继续…",
     ["GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."] = "GitHub 拒绝了此请求：搜索不支持细粒度个人访问令牌。请改用经典令牌（参见 AppStore README）。",
     ["Cached %s plugins."] = "已缓存 %s 个插件。",
     ["Cached %s patch repositories."] = "已缓存 %s 个补丁仓库。",

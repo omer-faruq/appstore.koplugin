@@ -818,38 +818,71 @@ const SearchCore = {
   PER_PAGE: 100,
   AIM: 900,
   ORIGIN_TS: 1191196800, // 2007-10-01, before GitHub existed
+  WINDOW_ATTEMPTS: 3, // pagings of a window before what came back is taken as it is
 
   isoTime(ts) { return new Date(ts * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'); },
   parseIso(s) {
     const t = typeof s === 'string' ? Date.parse(s) : NaN;
     return Number.isNaN(t) ? null : Math.floor(t / 1000);
   },
-  windowQuery(query, from, to) { return `${query} created:${this.isoTime(from)}..${this.isoTime(to)}`; },
+  // `to` null: no upper end. The newest window is left open rather than closed at "now",
+  // which a wrong clock would put before repositories that exist.
+  windowQuery(query, from, to) {
+    if (to == null) return `${query} created:>=${this.isoTime(from)}`;
+    return `${query} created:${this.isoTime(from)}..${this.isoTime(to)}`;
+  },
 
-  // Page through [from, to]. { over: true, count } when it holds 1000 or more (known from
-  // page 1, whose results are kept all the same); otherwise { over: false, count, times }.
-  async fetchWindow(ctx, query, from, to) {
-    const windowed = this.windowQuery(query, from, to);
-    const times = [];
-    for (let page = 1; ; page++) {
-      const res = await ctx.fetch(windowed, page, this.PER_PAGE);
-      const total = Number(res.total_count) || 0;
-      const items = res.items || [];
-      for (const repo of items) {
-        if (!repo || typeof repo !== 'object') continue;
-        ctx.append(repo);
+  // Appends a response's results; returns how many this pass had not seen (keyed by id).
+  takeItems(ctx, items, seen, times) {
+    let fresh = 0;
+    for (const repo of items) {
+      if (!repo || typeof repo !== 'object') continue;
+      ctx.append(repo);
+      const key = repo.id ?? repo.full_name;
+      if (key == null || !seen.has(key)) {
+        if (key != null) seen.add(key);
+        fresh++;
         const t = this.parseIso(repo.created_at);
         if (t !== null) times.push(t);
       }
-      // Ten full pages of a window counted under the ceiling: it grew while being paged.
-      if ((page === 1 && total >= this.RESULT_LIMIT)
-          || (items.length === this.PER_PAGE && page * this.PER_PAGE >= this.RESULT_LIMIT)) {
-        return { over: true, count: Math.max(total, this.RESULT_LIMIT) };
-      }
-      if (items.length < this.PER_PAGE || page * this.PER_PAGE >= total) {
-        return { over: false, count: total, times };
-      }
     }
+    return fresh;
+  },
+
+  // Page through [from, to] (`to` null: from on). { over: true, count } when it holds 1000
+  // or more (known from page 1, whose results are kept all the same); otherwise
+  // { over: false, count, times }. Pages shift under a deletion or a star between two of
+  // them, and GitHub flags a search that ran out of time `incomplete_results`; when the
+  // pages do not add up to the highest count seen, the window is paged again. Still short
+  // after WINDOW_ATTEMPTS: flagged incomplete throws, a count that never adds up is taken.
+  async fetchWindow(ctx, query, from, to) {
+    const windowed = this.windowQuery(query, from, to);
+    let total = 0, times = [], incomplete = false;
+    for (let attempt = 1; attempt <= this.WINDOW_ATTEMPTS; attempt++) {
+      const seen = new Set();
+      let got = 0, most = 0;
+      times = [];
+      incomplete = false;
+      for (let page = 1; ; page++) {
+        const res = await ctx.fetch(windowed, page, this.PER_PAGE);
+        if (Number(res.server_time) > 0) ctx.serverTime = Number(res.server_time);
+        total = Number(res.total_count) || 0;
+        most = Math.max(most, total);
+        if (res.incomplete_results === true) incomplete = true;
+        const items = res.items || [];
+        got += this.takeItems(ctx, items, seen, times);
+        // Ten full pages of a window counted under the ceiling: it grew while being paged.
+        if ((page === 1 && total >= this.RESULT_LIMIT)
+            || (items.length === this.PER_PAGE && page * this.PER_PAGE >= this.RESULT_LIMIT)) {
+          return { over: true, count: Math.max(total, this.RESULT_LIMIT) };
+        }
+        if (items.length < this.PER_PAGE || page * this.PER_PAGE >= total) break;
+      }
+      if (got >= most && !incomplete) return { over: false, count: total, times };
+      ctx.warn(`Search window came back short (${got} of ${most}${incomplete ? ', incomplete_results' : ''}), paging it again: ${windowed}`);
+    }
+    if (incomplete) throw new Error(`GitHub returned incomplete search results for ${windowed}`);
+    return { over: false, count: total, times };
   },
 
   // Results per second just before `to`, from the newer half of a window taken whole.
@@ -868,7 +901,7 @@ const SearchCore = {
     for (let page = 1; page <= this.RESULT_LIMIT / this.PER_PAGE; page++) {
       const res = await ctx.fetch(windowed, page, this.PER_PAGE);
       const items = res.items || [];
-      for (const repo of items) ctx.append(repo);
+      this.takeItems(ctx, items, new Set(), []);
       if (items.length < this.PER_PAGE) break;
     }
   },
@@ -904,9 +937,13 @@ const SearchCore = {
     return Math.max(baseStop + 1, Math.min(cut, outer.stop - 1));
   },
 
+  // `to` is the present as far as it is known: the last marker stands for everything from
+  // the cursor on, and a window ending at it is left open. Still over the ceiling past it
+  // once the cursor gets there (a clock far behind), the present is pushed out, doubling.
   async sweep(ctx, query, from, to, total) {
     let markers = [{ stop: to, count: total }];
     let density = null;
+    const start = from;
     while (markers.length > 0) {
       let j = 0;
       while (j < markers.length && markers[j].count < this.RESULT_LIMIT) j++;
@@ -916,11 +953,22 @@ const SearchCore = {
       const baseCount = base ? base.count : 0;
 
       let cut, result;
+      if (outer && outer.stop === to && outer.stop - baseStop <= 1) {
+        // Over the ceiling past the present: the present was not the present.
+        to += Math.max(86400, to - start);
+        outer.stop = to;
+        continue;
+      }
       if (!outer || baseCount >= this.AIM || outer.stop - baseStop <= 1) {
         if (base) {
           cut = baseStop;
-          // Counted empty: nothing created before `now` turns up there since.
-          result = baseCount > 0 ? await this.fetchWindow(ctx, query, from, cut) : { over: false, count: 0 };
+          if (cut === to) {
+            // The newest window: open, for whatever was created since.
+            result = await this.fetchWindow(ctx, query, from, null);
+          } else {
+            // Counted empty: nothing created in the past turns up there since.
+            result = baseCount > 0 ? await this.fetchWindow(ctx, query, from, cut) : { over: false, count: 0 };
+          }
         } else {
           cut = outer.stop;
           await this.takeOneSecond(ctx, query, cut);
@@ -948,14 +996,15 @@ const SearchCore = {
 
   // Every repository matching `query`. opts: fetch(query, page, perPage) -> response
   // (throws on failure), append(repo) (repeats are the caller's to drop), minStars, now
-  // (seconds), warn(msg).
+  // (seconds; the present when responses carry no `server_time`, only a guide to where
+  // windows are cut, never an end to what is searched), warn(msg).
   async collect(query, opts) {
-    const ctx = { fetch: opts.fetch, append: opts.append, warn: opts.warn || (() => {}) };
+    const ctx = { fetch: opts.fetch, append: opts.append, warn: opts.warn || (() => {}), serverTime: null };
     if (opts.minStars > 0) query = `${query} stars:>=${opts.minStars}`;
-    const now = opts.now || Math.floor(Date.now() / 1000);
-    const first = await this.fetchWindow(ctx, query, this.ORIGIN_TS, now);
+    const first = await this.fetchWindow(ctx, query, this.ORIGIN_TS, null);
     if (!first.over) return;
-    await this.sweep(ctx, query, this.ORIGIN_TS, now, first.count);
+    const now = ctx.serverTime || opts.now || Math.floor(Date.now() / 1000);
+    await this.sweep(ctx, query, this.ORIGIN_TS, Math.max(now, this.ORIGIN_TS + 1), first.count);
   },
 };
 // ─── search-core:end
@@ -974,15 +1023,30 @@ const GitHub = {
   // Set by the app, to tell the user why nothing is happening for a minute.
   onRateLimitWait: null,
   sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); },
-  // Seconds until a rate-limited request may be repeated, or null when GitHub did not say.
-  rateLimitDelay(res) {
-    const retryAfter = Number(res.headers.get('Retry-After'));
-    if (retryAfter > 0) return Math.ceil(retryAfter);
+  // The search limit's window, in seconds: the longest a search rate limit lasts.
+  SEARCH_LIMIT_WINDOW: 60,
+  // Seconds until a rate-limited 403/429 may be repeated, or null when it is no rate limit.
+  // As the plugin's rateLimitDelay: Retry-After when given; out of requests, until the
+  // reset (a reset already past means the clocks disagree: a whole window; the search
+  // limit never longer than its minute); otherwise, a secondary limit, a minute. The
+  // response's Date is not exposed to the page, so the reset is measured on this clock.
+  async rateLimitDelay(res) {
+    const window = this.SEARCH_LIMIT_WINDOW;
+    const retryAfterHeader = res.headers.get('Retry-After');
+    const retryAfter = Number(retryAfterHeader);
+    if (retryAfterHeader !== null && retryAfterHeader !== '' && Number.isFinite(retryAfter)) {
+      return Math.max(1, Math.ceil(retryAfter));
+    }
     const reset = Number(res.headers.get('X-RateLimit-Reset'));
     if (res.headers.get('X-RateLimit-Remaining') === '0' && reset > 0) {
-      return Math.max(1, reset - Math.floor(Date.now() / 1000) + 1);
+      const delay = reset - Math.floor(Date.now() / 1000) + 1;
+      if (delay < 1) return window + 1;
+      return res.headers.get('X-RateLimit-Resource') === 'search' ? Math.min(delay, window + 1) : delay;
     }
-    return null;
+    if (res.status === 429) return window;
+    let text = '';
+    try { text = await res.clone().text(); } catch (e) {}
+    return /rate limit/i.test(text) ? window : null;
   },
   getHeaders() {
     const h = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'KOReader-AppStore-Web' };
@@ -995,8 +1059,10 @@ const GitHub = {
     let res;
     let serverRetries = 0;
     let rateLimitWaits = 0;
+    let rateLimited = false; // a 403 is only a rate limit when GitHub says so
     while (true) {
       res = await fetch(url, { headers: this.getHeaders() });
+      rateLimited = false;
       if (res.ok) break;
       if (res.status >= 500 && res.status <= 599 && serverRetries < this.SERVER_ERROR_RETRY_DELAYS.length) {
         const delay = this.SERVER_ERROR_RETRY_DELAYS[serverRetries++];
@@ -1005,7 +1071,8 @@ const GitHub = {
         continue;
       }
       if (res.status === 403 || res.status === 429) {
-        const delay = this.rateLimitDelay(res);
+        const delay = await this.rateLimitDelay(res);
+        rateLimited = delay !== null;
         if (delay !== null && delay <= this.RATE_LIMIT_MAX_WAIT && rateLimitWaits < this.RATE_LIMIT_MAX_WAITS) {
           rateLimitWaits++;
           console.info(`GitHub rate limit reached, waiting ${delay} s`);
@@ -1023,7 +1090,7 @@ const GitHub = {
         if (body.message) detail = body.message;
       } catch(e) {}
       const hasToken = !!(Storage.get('github_pat') || '').trim();
-      if (res.status === 429 || res.status === 403) {
+      if (rateLimited) {
         const resetHeader = res.headers.get('X-RateLimit-Reset');
         const remaining = res.headers.get('X-RateLimit-Remaining');
         let extra = '';

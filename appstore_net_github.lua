@@ -42,10 +42,45 @@ end
 GitHubClient.SERVER_ERROR_RETRY_DELAYS = { 1, 3 }
 
 -- How a retry waits. A field so the refresh can swap in a wait that keeps reading input
--- (Back still stops it), and the tests one that does not wait at all.
+-- (Back still stops it), and the tests one that does not wait at all. Returns false when
+-- the wait was cut short by the user stopping, and then nothing is retried.
 function GitHubClient.wait(seconds)
     require("ffi/util").sleep(seconds)
+    return true
 end
+
+-- The search limit's window, in seconds: the longest a search rate limit can last.
+GitHubClient.SEARCH_LIMIT_WINDOW = 60
+
+local MONTHS = {
+    Jan = 1, Feb = 2, Mar = 3, Apr = 4, May = 5, Jun = 6,
+    Jul = 7, Aug = 8, Sep = 9, Oct = 10, Nov = 11, Dec = 12,
+}
+
+-- Seconds since the epoch for an HTTP Date header ("Tue, 14 Nov 2023 22:13:20 GMT"), or
+-- nil. GitHub's clock rather than the device's, which on an e-reader is often far off.
+-- Computed rather than handed to os.time, which would read it as local time.
+local function parseHttpDate(value)
+    if type(value) ~= "string" then
+        return nil
+    end
+    local d, mon, y, hh, mm, ss = value:match("(%d+) (%a+) (%d+) (%d+):(%d+):(%d+)")
+    local m = MONTHS[mon]
+    if not m then
+        return nil
+    end
+    y, d = tonumber(y), tonumber(d)
+    if m <= 2 then
+        y = y - 1
+    end
+    local era = math.floor(y / 400)
+    local yoe = y - era * 400
+    local doy = math.floor((153 * ((m + 9) % 12) + 2) / 5) + d - 1
+    local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+    local days = era * 146097 + doe - 719468
+    return days * 86400 + tonumber(hh) * 3600 + tonumber(mm) * 60 + tonumber(ss)
+end
+GitHubClient.parseHttpDate = parseHttpDate
 
 local function requestOnce(target, headers)
     local response_body = {}
@@ -88,29 +123,44 @@ local function request(path, query)
             break
         end
         logger.warn("AppStore: GitHub server error, retrying in", delay, "s:", code, target)
-        GitHubClient.wait(delay)
+        if GitHubClient.wait(delay) == false then
+            break
+        end
         code, body, response_headers = requestOnce(target, headers)
     end
     return code, body, response_headers
 end
 
 -- How long to wait out the rate limit behind `err_info` (from searchRepositories), in
--- seconds from `now`, or nil when GitHub did not say. Retry-After comes with the secondary
--- limits; X-RateLimit-Reset with the primary one, as the epoch second the window reopens.
+-- seconds, or nil when it is no rate limit. GitHub's own rules: Retry-After when it is
+-- given; out of requests, until X-RateLimit-Reset; otherwise (a secondary limit) a minute.
+--
+-- The reset is an epoch second on GitHub's clock, so it is measured against the response's
+-- Date; `now` (the device clock) only stands in when that is missing. A reset that has
+-- already passed while GitHub still says none are left means the clocks disagree, and by
+-- how much is unknown: a whole window is waited. The search limit is counted per minute,
+-- so its wait is never longer than one.
 function GitHubClient.rateLimitDelay(err_info, now)
     if type(err_info) ~= "table" or not err_info.is_rate_limit then
         return nil
     end
+    local window = GitHubClient.SEARCH_LIMIT_WINDOW
     local retry_after = tonumber(err_info.retry_after)
     if retry_after then
         return math.max(1, math.ceil(retry_after))
     end
     local reset_at = tonumber(err_info.reset_at)
-    if reset_at then
-        -- One second past the reset: GitHub's clock and ours are not the same clock.
-        return math.max(1, reset_at - (now or os.time()) + 1)
+    if err_info.remaining == "0" and reset_at then
+        local delay = reset_at - (err_info.server_time or now or os.time()) + 1
+        if delay < 1 then
+            return window + 1
+        end
+        if err_info.resource == "search" then
+            return math.min(delay, window + 1)
+        end
+        return delay
     end
-    return nil
+    return window
 end
 
 local function buildQuery(opts)
@@ -161,14 +211,25 @@ function GitHubClient.searchRepositories(opts)
         local is_fine_grained_unsupported = code == 403
             and body
             and body:lower():find("fine%-grained", 1, true) ~= nil
+        -- A 403 is a rate limit only when GitHub says so: no requests left, a Retry-After,
+        -- or the wording of the secondary limits. Any other 403 is refused for good, and
+        -- waiting would not change that.
+        local remaining = response_headers["x-ratelimit-remaining"]
+        local retry_after = response_headers["retry-after"]
+        local is_rate_limit = code == 429 or (code == 403 and not is_fine_grained_unsupported
+            and (remaining == "0" or retry_after ~= nil
+                or (body and body:lower():find("rate limit", 1, true) ~= nil)))
         local err_info = {
             code = code,
             body = body,
-            is_rate_limit = (code == 403 or code == 429) and not is_fine_grained_unsupported,
+            is_rate_limit = is_rate_limit and true or false,
             is_fine_grained_unsupported = is_fine_grained_unsupported,
             -- For rateLimitDelay, so a caller can wait the limit out instead of failing.
-            retry_after = response_headers["retry-after"],
+            retry_after = retry_after,
             reset_at = response_headers["x-ratelimit-reset"],
+            remaining = remaining,
+            resource = response_headers["x-ratelimit-resource"],
+            server_time = parseHttpDate(response_headers["date"]),
         }
         return nil, err_info
     end
@@ -176,6 +237,11 @@ function GitHubClient.searchRepositories(opts)
     if not ok then
         logger.warn("GitHub search decode error", parsed)
         return nil, { code = 0, body = "decode", is_rate_limit = false }
+    end
+    if type(parsed) == "table" then
+        -- GitHub's time, for appstore_search: where "now" is, on a device whose clock may
+        -- be anywhere.
+        parsed.server_time = parseHttpDate(response_headers["date"])
     end
     return parsed, nil
 end

@@ -11,7 +11,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const html = readFileSync(join(root, 'docs', 'index.html'), 'utf8');
+// Line endings normalised: a Windows checkout (core.autocrlf) has CRLF, and the cuts below
+// look for "\n};\n".
+const html = readFileSync(join(root, 'docs', 'index.html'), 'utf8').replace(/\r\n/g, '\n');
 
 function cut(startMarker, endMarker) {
   const a = html.indexOf(startMarker);
@@ -46,6 +48,7 @@ function newFakeGitHub(repos) {
       cLo = Math.max(cLo, SearchCore.parseIso(m[1]));
       cHi = Math.min(cHi, SearchCore.parseIso(m[2]));
     }
+    for (const m of query.matchAll(/created:>=(\S+)/g)) cLo = Math.max(cLo, SearchCore.parseIso(m[1]));
     if ((page - 1) * perPage >= 1000) {
       gh.rejected++;
       throw new Error('GitHub API 422: Only the first 1000 search results are available');
@@ -59,7 +62,12 @@ function newFakeGitHub(repos) {
         total++;
       }
     }
-    return { total_count: total, items };
+    const response = { total_count: total, items };
+    // Hooks for a GitHub that does not stand still: `tamper` edits the answer, `after`
+    // changes the data between requests.
+    if (gh.tamper) gh.tamper(response, query, page);
+    if (gh.after) gh.after(repos);
+    return response;
   };
   return gh;
 }
@@ -107,6 +115,8 @@ function loadSnapshot(branch) {
 
 async function run(repos, opts = {}) {
   const gh = newFakeGitHub(repos);
+  gh.tamper = opts.tamper;
+  gh.after = opts.after;
   const seen = new Set();
   let warnings = 0, err = null;
   try {
@@ -114,7 +124,7 @@ async function run(repos, opts = {}) {
       fetch: opts.fetch ? opts.fetch(gh) : gh.fetch,
       append: repo => seen.add(repo.id),
       minStars: opts.minStars || 0,
-      now: NOW,
+      now: opts.now || NOW,
       warn: () => { warnings++; },
     });
   } catch (e) {
@@ -167,6 +177,83 @@ for (const [label, repos] of [
   check('failed request: stopped right there', r.gh.calls, 5);
 }
 
+// ── The device clock is not GitHub's ───────────────────────────────────────
+function withRecent(n, recent, seed) {
+  const repos = makeRepos(n, 0.4, seed);
+  for (let i = 1; i <= recent; i++) {
+    repos.push({ id: n + i, stargazers_count: i % 3, tie: i, created_ts: NOW - 7200 + Math.floor(i * 7200 / recent) });
+  }
+  return repos;
+}
+for (const [label, repos, opts] of [
+  ['clock 2 h behind, 300 repos', withRecent(250, 50, 31), { now: NOW - 7200 }],
+  ['clock 2 h behind, 3000 repos', withRecent(2950, 50, 32), { now: NOW - 7200 }],
+  ['clock reset to 2000, 300 repos', withRecent(250, 50, 33), { now: Date.UTC(2000, 0, 1) / 1000 }],
+  ['clock reset to 2000, 3000 repos', withRecent(2950, 50, 34), { now: Date.UTC(2000, 0, 1) / 1000 }],
+  ['clock a year ahead, 3000 repos', withRecent(2950, 50, 35), { now: NOW + 365 * 86400 }],
+]) {
+  const r = await run(repos, opts);
+  check(`${label}: no error`, r.err, null);
+  check(`${label}: all collected`, r.unique, repos.length);
+  check(`${label}: never asked past 1000`, r.gh.rejected, 0);
+}
+
+// ── GitHub's answers change under the search ───────────────────────────────
+function byStars(a, b) { return (b.stargazers_count - a.stargazers_count) || (a.tie - b.tie); }
+{
+  let missedRuns = 0;
+  for (let seed = 1; seed <= 20; seed++) {
+    const repos = makeRepos(3000, 0.3, 100 + seed);
+    const all = repos.slice();
+    const deleted = new Set();
+    const pick = rng(500 + seed);
+    let calls = 0;
+    const r = await run(repos, {
+      after: list => {
+        calls++;
+        if (calls % 2 === 0 && list.length > 0) deleted.add(list.splice(pick(list.length), 1)[0].id);
+      },
+    });
+    const missed = all.filter(x => !deleted.has(x.id) && !r.seen.has(x.id)).length;
+    if (missed > 0 || r.err) missedRuns++;
+  }
+  check('deletions mid-search: no surviving repo missed (20 seeds)', missedRuns, 0);
+}
+{
+  let missedRuns = 0;
+  for (let seed = 1; seed <= 20; seed++) {
+    const repos = makeRepos(3000, 0.3, 200 + seed);
+    const pick = rng(600 + seed);
+    const r = await run(repos, {
+      after: list => {
+        list[pick(list.length)].stargazers_count += 50;
+        list.sort(byStars);
+      },
+    });
+    if (r.unique !== repos.length || r.err) missedRuns++;
+  }
+  check('stars moving mid-search: nothing missed (20 seeds)', missedRuns, 0);
+}
+{
+  const repos = makeRepos(2500, 0.3, 41);
+  const tampered = new Set();
+  const r = await run(repos, {
+    tamper: (response, query, page) => {
+      if (page === 1 && !tampered.has(query)) {
+        tampered.add(query);
+        response.incomplete_results = true;
+        response.items.pop();
+      }
+    },
+  });
+  check('incomplete_results once: no error', r.err, null);
+  check('incomplete_results once: all collected', r.unique, 2500);
+}
+{
+  const r = await run(makeRepos(300, 0.3, 42), { tamper: response => { response.incomplete_results = true; } });
+  check('incomplete_results every time: an error, not a quiet partial result', r.err !== null, true);
+}
+
 // ── Request cost (same limits as the plugin's test where the data is the same) ──
 async function costCase(label, repos, limit, minStars = 0) {
   const r = await run(repos, { minStars });
@@ -192,13 +279,16 @@ function loadGitHub(responses) {
     const r = responses.shift();
     if (!r) throw new Error('no canned response left');
     const headers = new Map(Object.entries(r.headers || {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
-    return {
+    const make = () => ({
       ok: r.status >= 200 && r.status < 300,
       status: r.status,
       statusText: String(r.status),
       headers: { get: k => headers.get(k.toLowerCase()) ?? null },
       json: async () => r.body || {},
-    };
+      text: async () => JSON.stringify(r.body || {}),
+      clone: () => make(),
+    });
+    return make();
   };
   const GitHub = new Function('Storage', 'fetch', `${githubSrc}\nreturn GitHub;`)(Storage, fetchStub);
   GitHub.sleep = async ms => { sleeps.push(ms); };
@@ -240,6 +330,47 @@ function loadGitHub(responses) {
   const t = loadGitHub([{ status: 429, headers: { 'Retry-After': '20' } }, { status: 200, body: { ok: 1 } }]);
   await t.GitHub.request('/search/repositories');
   check('Retry-After honoured', t.sleeps[0], 20000);
+}
+{
+  const t = loadGitHub([{ status: 429, headers: { 'Retry-After': '0' } }, { status: 200, body: { ok: 1 } }]);
+  await t.GitHub.request('/search/repositories');
+  check('Retry-After 0: still a second, as in the plugin', t.sleeps[0], 1000);
+}
+{
+  // Out of requests, the reset already behind us: our clock is ahead of GitHub's.
+  const reset = Math.floor(Date.now() / 1000) - 10;
+  const t = loadGitHub([
+    { status: 403, headers: { 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': reset } },
+    { status: 200, body: { ok: 1 } },
+  ]);
+  await t.GitHub.request('/search/repositories');
+  check('reset already past: a full window, not a second', t.waits[0], 61);
+}
+{
+  // The search limit resets every minute: a reset further off is a clock behind.
+  const reset = Math.floor(Date.now() / 1000) + 90;
+  const t = loadGitHub([
+    { status: 403, headers: { 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': reset, 'X-RateLimit-Resource': 'search' } },
+    { status: 200, body: { ok: 1 } },
+  ]);
+  await t.GitHub.request('/search/repositories');
+  check('search limit: never waits past its minute', t.waits[0], 61);
+}
+{
+  const t = loadGitHub([
+    { status: 403, headers: { 'X-RateLimit-Remaining': '27' }, body: { message: 'You have exceeded a secondary rate limit.' } },
+    { status: 200, body: { ok: 1 } },
+  ]);
+  const body = await t.GitHub.request('/search/repositories');
+  check('secondary limit: waited out', body.ok, 1);
+  check('secondary limit: a minute', t.waits[0], 60);
+}
+{
+  const t = loadGitHub([{ status: 403, headers: { 'X-RateLimit-Remaining': '27' }, body: { message: 'Resource not accessible' } }]);
+  let err = null;
+  try { await t.GitHub.request('/x'); } catch (e) { err = e; }
+  check('403 with requests left: not waited for', t.calls.length, 1);
+  check('403 with requests left: reported as what it is', err && err.message, 'GitHub API 403: Resource not accessible');
 }
 {
   const reset = Math.floor(Date.now() / 1000) + 3000;

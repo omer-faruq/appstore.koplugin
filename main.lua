@@ -9750,8 +9750,9 @@ AppStore.RATE_LIMIT_MAX_WAITS = 5
 
 -- Wait `seconds` in the middle of a refresh, reading input all the while so Back still
 -- stops it. Returns false when the refresh was stopped meanwhile. Outside a coroutine
--- (nothing to yield to) it can only sleep.
-function AppStore.refreshWait(seconds)
+-- (nothing to yield to) it can only sleep. `on_second(left)`, if given, is called with the
+-- whole seconds still to go each time that number changes, for a countdown.
+function AppStore.refreshWait(seconds, on_second)
     local progress = AppStore._refresh_progress
     if not (progress and coroutine.running()) then
         require("ffi/util").sleep(seconds)
@@ -9759,9 +9760,17 @@ function AppStore.refreshWait(seconds)
     end
     local time = require("ui/time")
     local deadline = time.now() + time.s(seconds)
+    local shown
     while time.now() < deadline do
         if AppStore._refresh_cancelled then
             return false
+        end
+        if on_second then
+            local left = math.ceil(time.to_s(deadline - time.now()))
+            if left ~= shown then
+                shown = left
+                on_second(left)
+            end
         end
         progress:pump()
     end
@@ -9805,15 +9814,23 @@ local function performSearchPage(query, page, per_page)
         rate_limit_waits = rate_limit_waits + 1
         logger.info("AppStore: search rate limit reached, waiting", delay, "s")
         local title = progress and progress.title
-        if progress then
-            progress:setTitle(string.format(_("GitHub rate limit reached. Continuing in %d s…"), delay))
+        local function countdown(left)
+            if progress then
+                progress:setTitle(string.format(_("GitHub rate limit reached. Continuing in %d s…"), left))
+            end
         end
-        if not AppStore.refreshWait(delay) then
+        countdown(delay)
+        if not AppStore.refreshWait(delay, countdown) then
             return nil, { code = "cancelled", cancelled = true }
         end
         if progress then
             progress:setTitle(title)
         end
+    end
+    -- Stopped while GitHub.request waited to retry a server error: it gave up rather than
+    -- retry, and what it hands back is that, not a failure of the search.
+    if not response and AppStore._refresh_cancelled then
+        return nil, { code = "cancelled", cancelled = true }
     end
     if not response then
         if type(err) == "table" and err.is_fine_grained_unsupported then
@@ -9850,9 +9867,11 @@ local function searchAllBranches(base_query, append)
             min_stars = branch.min_stars,
             warn = logger.warn,
         })
-        -- performSearchPage has already marked the refresh incomplete; what was collected
-        -- stays collected, and the next branch still runs (a cancelled one returns at once).
+        -- What was collected stays collected, and the next branch still runs (a cancelled
+        -- one returns at once). A failed request has marked the refresh incomplete already;
+        -- marked here too for the search's own errors (GitHub said its results were partial).
         if err and not AppStore.searchWasCancelled(err) then
+            AppStore._refresh_search_incomplete = true
             logger.warn("AppStore search error", query, type(err) == "table" and err.body or err)
         end
     end

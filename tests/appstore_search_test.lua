@@ -82,6 +82,9 @@ local function newFakeGitHub(repos)
         for a, b in query:gmatch("created:(%S+)%.%.(%S+)") do
             c_lo, c_hi = math.max(c_lo, parseIso(a)), math.min(c_hi, parseIso(b))
         end
+        for a in query:gmatch("created:>=(%S+)") do
+            c_lo = math.max(c_lo, parseIso(a))
+        end
         if (page - 1) * per_page >= 1000 then
             gh.rejected = gh.rejected + 1
             return nil, { code = 422, body = "Only the first 1000 search results are available" }
@@ -97,7 +100,12 @@ local function newFakeGitHub(repos)
                 end
             end
         end
-        return { total_count = total, items = items }
+        local response = { total_count = total, items = items, server_time = gh.server_time }
+        -- Hooks for a GitHub that does not stand still: `tamper` edits the answer,
+        -- `after` changes the data between requests.
+        if gh.tamper then gh.tamper(response, query, page) end
+        if gh.after then gh.after(repos) end
+        return response
     end
     return gh
 end
@@ -178,6 +186,7 @@ end
 local function run(repos, opts)
     opts = opts or {}
     local gh = newFakeGitHub(repos)
+    gh.server_time, gh.tamper, gh.after = opts.server_time, opts.tamper, opts.after
     local seen, unique = {}, 0
     local warnings = 0
     local err = Search.collect("in:name \".koplugin\"", {
@@ -189,7 +198,7 @@ local function run(repos, opts)
             end
         end,
         min_stars = opts.min_stars,
-        now = NOW,
+        now = opts.now or NOW,
         warn = function() warnings = warnings + 1 end,
     })
     return { err = err, unique = unique, seen = seen, gh = gh, warnings = warnings }
@@ -325,6 +334,127 @@ do
     })
     check("failed request: error handed back", r.err, failing)
     check("failed request: stopped right there", r.gh.calls, 5)
+end
+
+-- ── The device clock is not GitHub's ────────────────────────────────────────
+-- E-readers often run with a wrong clock. Whatever it says, repositories created
+-- up to the moment of the search are in it, and a clock that fell back to 2000
+-- with a drained battery does not empty the search.
+local function withRecent(n, recent, seed)
+    local repos = makeRepos(n, 0.4, seed)
+    for i = 1, recent do
+        repos[#repos + 1] = {
+            id = n + i, stargazers_count = i % 3, tie = i,
+            created_ts = NOW - 7200 + math.floor(i * 7200 / recent),
+        }
+    end
+    return repos
+end
+for _, case in ipairs({
+    { "clock 2 h behind, 300 repos", withRecent(250, 50, 31), { now = NOW - 7200 } },
+    { "clock 2 h behind, 3000 repos", withRecent(2950, 50, 32), { now = NOW - 7200 } },
+    { "clock reset to 2000, 300 repos", withRecent(250, 50, 33), { now = utc(2000, 1, 1) } },
+    { "clock reset to 2000, 3000 repos", withRecent(2950, 50, 34), { now = utc(2000, 1, 1) } },
+    { "clock a year ahead, 3000 repos", withRecent(2950, 50, 35), { now = NOW + 365 * 86400 } },
+}) do
+    local label, repos, opts = case[1], case[2], case[3]
+    local r = run(repos, opts)
+    check(label .. ": no error", r.err, nil)
+    check(label .. ": all collected", r.unique, #repos)
+    check(label .. ": never asked past 1000", r.gh.rejected, 0)
+end
+do
+    -- With GitHub's own time on the response, the device clock does not matter at all.
+    local repos = withRecent(2950, 50, 36)
+    local r = run(repos, { now = utc(2000, 1, 1), server_time = NOW })
+    check("server time used: all collected", r.unique, #repos)
+    check("server time used: costs what a right clock does (" .. r.gh.calls .. ")", r.gh.calls <= 40, true)
+end
+
+-- ── GitHub's answers change under the search ────────────────────────────────
+-- Sorted by stars, pages shift when a repository is deleted or starred between
+-- two of them, and one slips past unseen. A window whose pages do not add up to
+-- its count is fetched again.
+local function survivors(repos, deleted)
+    local n = 0
+    for _, r in ipairs(repos) do
+        if not deleted[r.id] then n = n + 1 end
+    end
+    return n
+end
+do
+    local missed_runs = 0
+    for seed = 1, 20 do
+        local repos = makeRepos(3000, 0.3, 100 + seed)
+        local all = {}
+        for i, r in ipairs(repos) do all[i] = r end
+        local deleted, calls = {}, 0
+        local pick = rng(500 + seed)
+        local r = run(repos, {
+            after = function(list)
+                calls = calls + 1
+                if calls % 2 == 0 and #list > 0 then
+                    local victim = table.remove(list, 1 + pick(#list))
+                    deleted[victim.id] = true
+                end
+            end,
+        })
+        local missed = 0
+        for _, repo in ipairs(all) do
+            if not deleted[repo.id] and not r.seen[repo.id] then missed = missed + 1 end
+        end
+        if missed > 0 or r.err then missed_runs = missed_runs + 1 end
+    end
+    check("deletions mid-search: no surviving repo missed (20 seeds)", missed_runs, 0)
+end
+do
+    local missed_runs = 0
+    for seed = 1, 20 do
+        local repos = makeRepos(3000, 0.3, 200 + seed)
+        local pick = rng(600 + seed)
+        local r = run(repos, {
+            after = function(list)
+                -- One repository gains stars and moves up the order.
+                local repo = list[1 + pick(#list)]
+                repo.stargazers_count = repo.stargazers_count + 50
+                table.sort(list, function(a, b)
+                    if a.stargazers_count ~= b.stargazers_count then
+                        return a.stargazers_count > b.stargazers_count
+                    end
+                    return a.tie < b.tie
+                end)
+            end,
+        })
+        if r.unique ~= #repos or r.err then missed_runs = missed_runs + 1 end
+    end
+    check("stars moving mid-search: nothing missed (20 seeds)", missed_runs, 0)
+end
+do
+    -- GitHub ran out of time on a window and says so: the page came back short.
+    local repos = makeRepos(2500, 0.3, 41)
+    local tampered = {}
+    local r = run(repos, {
+        tamper = function(response, query, page)
+            if page == 1 and not tampered[query] then
+                tampered[query] = true
+                response.incomplete_results = true
+                table.remove(response.items)
+            end
+        end,
+    })
+    check("incomplete_results once: no error", r.err, nil)
+    check("incomplete_results once: all collected", r.unique, 2500)
+end
+do
+    -- And keeps saying so: what came back is partial, and the search must say that
+    -- rather than pass it off as everything.
+    local repos = makeRepos(300, 0.3, 42)
+    local r = run(repos, {
+        tamper = function(response)
+            response.incomplete_results = true
+        end,
+    })
+    check("incomplete_results every time: an error, not a quiet partial result", r.err ~= nil, true)
 end
 
 if failures > 0 then

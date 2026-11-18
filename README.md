@@ -247,11 +247,16 @@ configured interval, not permanent.
 - GitHub's search returns at most 1000 results per query. When a query matches more,
   the refresh splits it by creation date on its own, down to the second if it has to,
   so nothing is left out however many repositories match. It costs about one request
-  per hundred repositories.
+  per hundred repositories. The newest slice is left open-ended, so a device clock
+  that is wrong (even years behind) does not hide recent repositories.
+- Results that shift while they are paged (a repository deleted or starred meanwhile),
+  or that GitHub marks as incomplete, are fetched again. If GitHub keeps marking them
+  incomplete, the refresh is reported as incomplete and the cache is left as it was.
 - The search rate limit is counted per minute (10 requests without a token, 30 with).
   A refresh that runs into it waits for the window to reopen — the dialog shows
-  "GitHub rate limit reached. Continuing in N s…" — and carries on; Back still stops
-  it. Only a longer wait (the hourly limit) ends the refresh with the rate-limit message.
+  "GitHub rate limit reached. Continuing in N s…", counting down — and carries on;
+  Back still stops it. The wait is timed on GitHub's clock, not the device's. Only a
+  longer wait (the hourly limit) ends the refresh with the rate-limit message.
 - GitHub server errors (5xx) are retried twice, after 1 and 3 seconds. Timeouts are
   not: on a network that is down, retrying would only keep the screen busy longer.
 
