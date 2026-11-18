@@ -100,7 +100,13 @@ local function newFakeGitHub(repos)
                 end
             end
         end
-        local response = { total_count = total, items = items, server_time = gh.server_time }
+        -- `server_clock`: GitHub's time moving on, two seconds a request, as a real
+        -- Date header does over a long search.
+        local server_time = gh.server_time
+        if gh.server_clock then
+            server_time = gh.server_clock + 2 * gh.calls
+        end
+        local response = { total_count = total, items = items, server_time = server_time }
         -- Hooks for a GitHub that does not stand still: `tamper` edits the answer,
         -- `after` changes the data between requests.
         if gh.tamper then gh.tamper(response, query, page) end
@@ -187,9 +193,10 @@ local function run(repos, opts)
     opts = opts or {}
     local gh = newFakeGitHub(repos)
     gh.server_time, gh.tamper, gh.after = opts.server_time, opts.tamper, opts.after
+    gh.server_clock = opts.server_clock
     local seen, unique = {}, 0
     local warnings = 0
-    local err = Search.collect("in:name \".koplugin\"", {
+    local err, partial = Search.collect("in:name \".koplugin\"", {
         fetch = opts.fetch and opts.fetch(gh) or gh.fetch,
         append = function(repo)
             if not seen[repo.id] then
@@ -201,7 +208,7 @@ local function run(repos, opts)
         now = opts.now or NOW,
         warn = function() warnings = warnings + 1 end,
     })
-    return { err = err, unique = unique, seen = seen, gh = gh, warnings = warnings }
+    return { err = err, partial = partial == true, unique = unique, seen = seen, gh = gh, warnings = warnings }
 end
 
 local function expectedCount(repos, min_stars)
@@ -271,6 +278,7 @@ local function costCase(label, repos, limit, min_stars)
     local want = expectedCount(repos, min_stars)
     check(label .. ": all collected", r.unique, want)
     check(label .. ": never asked past 1000", r.gh.rejected, 0)
+    check(label .. ": not partial", r.partial, false)
     check(string.format("%s: at most %d requests (floor %d, took %d)", label, limit,
         math.ceil(want / 100), r.gh.calls), r.gh.calls <= limit, true)
 end
@@ -314,6 +322,7 @@ do
     check("1500 in one second: no error", r.err, nil)
     check("1500 in one second: the reachable 1000 collected", r.unique, 1000)
     check("1500 in one second: warned", r.warnings > 0, true)
+    check("1500 in one second: reported partial", r.partial, true)
     check("1500 in one second: never asked past 1000", r.gh.rejected, 0)
 end
 
@@ -457,6 +466,7 @@ do
     check("incomplete_results every time: no error", r.err, nil)
     check("incomplete_results every time: all collected", r.unique, 2500)
     check("incomplete_results every time: warned", r.warnings > 0, true)
+    check("incomplete_results every time: reported partial", r.partial, true)
     check("incomplete_results every time: bounded cost (" .. r.gh.calls .. ")", r.gh.calls <= 120, true)
 end
 
@@ -485,6 +495,7 @@ for _, zero_share in ipairs({ 0.6, 0.95 }) do
     local label = string.format("unstable tie order (%d%% at 0 stars)", zero_share * 100)
     check(label .. ": no error", r.err, nil)
     check(label .. ": all collected", r.unique, 3000)
+    check(label .. ": not partial (one-page pieces settle it)", r.partial, false)
 end
 
 -- ── A count GitHub never makes good ─────────────────────────────────────────
@@ -499,6 +510,7 @@ do
     })
     check("count one too high: no error", r.err, nil)
     check("count one too high: all collected", r.unique, 3000)
+    check("count one too high: reported partial (no way to tell)", r.partial, true)
     check(string.format("count one too high: at most 2.5x the requests (%d vs %d)", r.gh.calls, plain.gh.calls),
         r.gh.calls <= plain.gh.calls * 2.5, true)
 end
@@ -507,23 +519,35 @@ end
 -- The present is pushed out only as far as there is evidence of: GitHub's time, or
 -- the newest repository seen. Past that the search ends incomplete, rather than
 -- walking windows into the empty future (and past the year os.date can print).
-do
+for _, clock in ipairs({ { "", nil }, { ", GitHub's clock moving", NOW } }) do
     local repos = makeRepos(3000, 0.3, 46)
     local r = run(repos, {
+        server_clock = clock[2],
         tamper = function(response, query)
             if query:find("created:>=", 1, true) and response.total_count > 0 then
                 response.total_count = response.total_count + 1000
             end
         end,
     })
-    check("inflated open window: stops (" .. r.gh.calls .. " requests)", r.gh.calls <= 80, true)
-    check("inflated open window: reported incomplete", type(r.err) == "table" and r.err.incomplete, true)
+    local label = "inflated open window" .. clock[1]
+    check(label .. ": stops (" .. r.gh.calls .. " requests)", r.gh.calls <= 80, true)
+    check(label .. ": no error, reported partial", r.err == nil and r.partial, true)
+    check(label .. ": everything there is collected", r.unique, 3000)
     local bad = 0
     for _, q in ipairs(r.gh.queries) do
-        local y = q:match("created:[>=]*(%d%d%d%d)")
-        if q:find("nil", 1, true) or (y and tonumber(y) > 2027) then bad = bad + 1 end
+        local y, mo, d = q:match("created:[>=]*(%d%d%d%d)-(%d%d)-(%d%d)")
+        if q:find("nil", 1, true) or (y and utc(tonumber(y), tonumber(mo), tonumber(d)) > NOW + 2 * 86400) then
+            bad = bad + 1
+        end
     end
-    check("inflated open window: no window in the far future", bad, 0)
+    check(label .. ": no window in the future", bad, 0)
+end
+
+-- ── Cutting a window never makes more pieces than a full window needs ───────
+do
+    local stops = Search._pieceStops({}, 0, 10 ^ 8, false, 10 ^ 6)
+    check("absurd count: pieces capped (" .. #stops + 1 .. ")",
+        #stops + 1 <= math.ceil(Search.RESULT_LIMIT / Search.PIECE), true)
 end
 
 if failures > 0 then

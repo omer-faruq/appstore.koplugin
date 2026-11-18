@@ -43,6 +43,13 @@ Search.ORIGIN_TS = 1191196800
 Search.PIECE = 90
 -- How many times a window is cut that way before what came back is taken as it is.
 Search.MAX_DEPTH = 6
+-- What fetching a window in pieces may cost, on top of paging it once: this many times
+-- its pages, plus a few. Past that, what came back is taken (and the search reported
+-- partial) rather than a GitHub that keeps misbehaving costing without end.
+Search.PIECE_BUDGET = 4
+-- How many times "now" may be pushed out (see sweep): doubling from a day, far more
+-- than GitHub's whole history needs.
+Search.MAX_PUSHES = 24
 
 -- Seconds since the epoch for GitHub's "2024-01-31T10:00:00Z". Computed rather
 -- than handed to os.time, which would read it as local time.
@@ -126,7 +133,9 @@ local function pageOnce(ctx, windowed, seen, times)
         if not response then
             return err
         end
-        ctx.server_time = tonumber(response.server_time) or ctx.server_time
+        -- GitHub's time when the search began. Not the latest response's: that keeps
+        -- moving, and the sweep's limit on "now" would move with it (see sweep).
+        ctx.server_time = ctx.server_time or tonumber(response.server_time)
         total = tonumber(response.total_count) or 0
         most = math.max(most, total)
         incomplete = incomplete or response.incomplete_results == true
@@ -171,7 +180,9 @@ local function pieceStops(times, from_ts, to_ts, open, total)
             add(times[i])
         end
     else
-        local k = math.ceil(total / Search.PIECE)
+        -- A window paged whole holds under 1000; a count above that is GitHub's, not the
+    -- window's, and must not turn into thousands of pieces.
+    local k = math.ceil(math.min(total, Search.RESULT_LIMIT) / Search.PIECE)
         for i = 1, k - 1 do
             add(from_ts + math.floor(i * (hi - from_ts + 1) / k) - 1)
         end
@@ -190,10 +201,8 @@ end
 
 -- A thousand results created within one second: nothing left to cut on. Takes
 -- the thousand GitHub hands out.
-local function takeOneSecond(ctx, query, ts)
-    ctx.warn("AppStore search: over the result limit within one second, some results skipped",
-        query, isoTime(ts))
-    local windowed = windowQuery(query, ts, ts)
+local function takeFirstThousand(ctx, windowed)
+    ctx.partial = true
     for page = 1, Search.RESULT_LIMIT / Search.PER_PAGE do
         local response, err = ctx.fetch(windowed, page, Search.PER_PAGE)
         if not response then
@@ -205,6 +214,12 @@ local function takeOneSecond(ctx, query, ts)
             break
         end
     end
+end
+
+local function takeOneSecond(ctx, query, ts)
+    ctx.warn("AppStore search: over the result limit within one second, some results skipped",
+        query, isoTime(ts))
+    return takeFirstThousand(ctx, windowQuery(query, ts, ts))
 end
 
 -- Fetch everything created in [from_ts, to_ts] (`open`: from_ts on, `to_ts` only a
@@ -222,9 +237,10 @@ end
 -- move the same way, so a window that does not add up is fetched again in pieces
 -- of about one page each, cut where its creation times say: a single page cannot
 -- shift under itself. A one-page piece flagged incomplete is asked once more; one
--- that still does not add up is taken as GitHub gives it, with a warning -- a
--- count it never makes good, or a flag it keeps raising, must not fail every
--- refresh for good.
+-- that still does not add up is taken as GitHub gives it, with a warning, and the
+-- search reported partial (ctx.partial): a count GitHub never makes good, or a
+-- flag it keeps raising, must neither fail every refresh for good nor pass for a
+-- complete result. So is a window whose pieces would cost more than PIECE_BUDGET.
 local function fetchRange(ctx, query, from_ts, to_ts, open, depth)
     local windowed = windowQuery(query, from_ts, (not open) and to_ts or nil)
     local seen, times = {}, {}
@@ -249,19 +265,32 @@ local function fetchRange(ctx, query, from_ts, to_ts, open, depth)
             r = r2.over and r or r2
         end
         if got < r.total or r.incomplete then
+            ctx.partial = true
             ctx.warn("AppStore search: GitHub's count does not add up, taking what it gives",
                 windowed, got, r.total, r.incomplete and "incomplete_results" or "")
         end
         return nil, false, r.total, times
     end
-    local stops = depth < Search.MAX_DEPTH and pieceStops(times, from_ts, to_ts, open, r.total)
+    if depth == 0 then
+        ctx.budget_end = ctx.calls
+            + Search.PIECE_BUDGET * math.ceil(math.min(r.total, Search.RESULT_LIMIT) / Search.PER_PAGE) + 10
+    end
+    local stops = depth < Search.MAX_DEPTH and ctx.calls < ctx.budget_end
+        and pieceStops(times, from_ts, to_ts, open, r.total)
     if not stops then
-        if r.over and not open then
-            err = takeOneSecond(ctx, query, from_ts)
+        if r.over then
+            -- Cut short by depth or budget rather than down to one second: whatever the
+            -- range, the thousand GitHub hands out, never just its first second.
+            if not open and from_ts >= to_ts then
+                err = takeOneSecond(ctx, query, from_ts)
+            else
+                err = takeFirstThousand(ctx, windowed)
+            end
             if err then
                 return err
             end
         end
+        ctx.partial = true
         ctx.warn("AppStore search: window cannot be cut further, taking what GitHub gives", windowed)
         return nil, false, r.total, times
     end
@@ -367,14 +396,16 @@ end
 -- everything from the cursor on, and a window ending at it is left open; should
 -- what lies past it still be over the ceiling once the cursor gets there (a clock
 -- far behind), the present is pushed out, doubling -- but only as far as there is
--- evidence of: GitHub's time, or the newest repository seen (a look at the open
--- window's page 1 adds to that when it runs out). With nothing more to go on, the
--- counts disagree with the windows, and the search ends incomplete rather than
--- walking windows into the empty future.
+-- evidence of: GitHub's time when the search began, or the newest repository seen
+-- (a look at the open window's page 1 adds to that when it runs out), and never
+-- more than MAX_PUSHES times. With nothing more to go on, the counts disagree with the windows: the
+-- open rest is taken as far as GitHub hands it out and the search reported
+-- partial, rather than walking windows into the empty future.
 local function sweep(ctx, query, from_ts, to_ts, total)
     local markers = { { stop = to_ts, count = total } }
     local density -- results per second just behind the cursor, once a window is taken
     local start_ts = from_ts
+    local pushes = 0
     while #markers > 0 do
         -- Ordered by stop, so the counts only grow outwards.
         local j = 0
@@ -389,20 +420,22 @@ local function sweep(ctx, query, from_ts, to_ts, total)
         if outer and outer.stop == to_ts and outer.stop - base_stop <= 1 then
             -- Over the ceiling past the present: the present was not the present.
             local limit = math.max(ctx.server_time or 0, ctx.newest or 0) + 86400
-            if to_ts >= limit then
-                local probe = {}
-                err = pageOnce(ctx, windowQuery(query, from_ts, nil), {}, probe)
+            if to_ts >= limit and pushes < Search.MAX_PUSHES then
+                err = pageOnce(ctx, windowQuery(query, from_ts, nil), {}, {})
                 limit = math.max(ctx.server_time or 0, ctx.newest or 0) + 86400
-                if not err and to_ts >= limit then
-                    err = { code = "incomplete", incomplete = true,
-                        body = "GitHub's counts do not match its results past "
-                            .. isoTime(from_ts) .. " for " .. query }
-                end
             end
-            if not err then
-                to_ts = math.min(to_ts + math.max(86400, to_ts - start_ts), limit)
-                outer.stop = to_ts
+            if err then
+                return err
             end
+            if to_ts >= limit or pushes >= Search.MAX_PUSHES then
+                -- Nothing more to go on: GitHub's counts and its results disagree past here.
+                -- The open rest is taken as far as GitHub hands it out.
+                ctx.warn("AppStore search: counts do not match results past", isoTime(from_ts), query)
+                return takeFirstThousand(ctx, windowQuery(query, from_ts, nil))
+            end
+            pushes = pushes + 1
+            to_ts = math.min(to_ts + math.max(86400, to_ts - start_ts), limit)
+            outer.stop = to_ts
         elseif not outer or base_count >= Search.AIM or outer.stop - base_stop <= 1 then
             if base then
                 -- A count of 0 is not taken on trust: it is worked out by subtraction,
@@ -468,25 +501,38 @@ end
 --                         windows are cut, never an end to what is searched
 -- opts.warn(...)          optional logger for results that could not be reached
 --
--- Returns nil once everything is collected, or the first fetch error (whatever
--- was appended before it stays appended).
+-- Returns the first fetch error (whatever was appended before it stays appended),
+-- or `nil, partial`: `partial` is true when GitHub left something out that could
+-- not be made good -- its count never added up, it kept flagging results
+-- incomplete, more than 1000 were created in one second -- so that the caller can
+-- keep what it had rather than take this for the whole list.
 function Search.collect(query, opts)
     local ctx = {
-        fetch = opts.fetch,
         append = opts.append,
         warn = opts.warn or function() end,
+        calls = 0,
+        budget_end = 0,
     }
+    function ctx.fetch(...)
+        ctx.calls = ctx.calls + 1
+        return opts.fetch(...)
+    end
     local min_stars = tonumber(opts.min_stars) or 0
     if min_stars > 0 then
         query = query .. string.format(" stars:>=%d", min_stars)
     end
     local now = tonumber(opts.now) or os.time()
     local err, over, total = fetchWindow(ctx, query, Search.ORIGIN_TS, math.max(now, Search.ORIGIN_TS + 1), true)
-    if err or not over then
+    if not err and over then
+        now = ctx.server_time or now
+        err = sweep(ctx, query, Search.ORIGIN_TS, math.max(now, Search.ORIGIN_TS + 1), total)
+    end
+    if err then
         return err
     end
-    now = ctx.server_time or now
-    return sweep(ctx, query, Search.ORIGIN_TS, math.max(now, Search.ORIGIN_TS + 1), total)
+    return nil, ctx.partial == true
 end
+
+Search._pieceStops = pieceStops -- for the tests
 
 return Search

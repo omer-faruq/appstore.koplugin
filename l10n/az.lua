@@ -384,6 +384,7 @@ return {
     ["AppStore refresh failed: "] = "AppStore yeniləməsi alınmadı: ",
     ["The search did not finish. The cache was left as it was."] = "Axtarış tamamlanmadı. Keş olduğu kimi saxlanıldı.",
     ["Nothing came back from GitHub. The cache was left as it was."] = "GitHub-dan heç bir məlumat alınmadı. Keş olduğu kimi saxlanıldı.",
+    ["GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."] = "GitHub bütün depoları qaytarmadı. Yeniləri əlavə edildi, heç biri silinmədi; növbəti yeniləmə yenidən cəhd edəcək.",
     ["App Store"] = "App Store",
     ["Open AppStore"] = "AppStore tətbiqini aç",
     ["AppStore · Updates"] = "AppStore · yeniləmələr",

@@ -384,6 +384,7 @@ return {
     ["AppStore refresh failed: "] = "Obnovenie AppStore zlyhalo: ",
     ["The search did not finish. The cache was left as it was."] = "Vyhľadávanie sa nedokončilo. Vyrovnávacia pamäť zostala nezmenená.",
     ["Nothing came back from GitHub. The cache was left as it was."] = "Z GitHubu neprišli žiadne výsledky. Vyrovnávacia pamäť zostala nezmenená.",
+    ["GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."] = "GitHub nevrátil všetky repozitáre. Nové boli pridané a žiadne neboli odstránené; ďalšia aktualizácia to skúsi znova.",
     ["App Store"] = "App Store",
     ["Open AppStore"] = "Otvoriť AppStore",
     ["AppStore · Updates"] = "AppStore · Aktualizácie",

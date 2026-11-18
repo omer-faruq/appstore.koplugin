@@ -375,6 +375,7 @@ return {
     ["Refresh stopped. The cache was left as it was."] = "Yenileme durduruldu. Önbellek olduğu gibi bırakıldı.",
     ["Refresh stopped. What was already downloaded has been kept."] = "Yenileme durduruldu. Şimdiye kadar indirilenler korundu.",
     ["Nothing came back from GitHub. The cache was left as it was."] = "GitHub'dan hiçbir şey gelmedi. Önbellek olduğu gibi bırakıldı.",
+    ["GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."] = "GitHub tüm depoları döndürmedi. Yeniler eklendi, hiçbiri silinmedi; bir sonraki yenileme yeniden deneyecek.",
     ["The search did not finish. The cache was left as it was."] = "Arama tamamlanmadı. Önbellek olduğu gibi bırakıldı.",
     ["Save"] = "Kaydet",
     ["Download source: %s"] = "İndirme kaynağı: %s",

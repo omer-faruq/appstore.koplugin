@@ -252,15 +252,21 @@ configured interval, not permanent.
   repositories; incremental refreshes are dated on GitHub's clock too.
 - A slice whose results do not add up to GitHub's count (a repository deleted or
   starred while it was being paged, or results GitHub marks as incomplete) is fetched
-  again in one-page pieces, which cannot shift. Whatever GitHub still does not hand
-  out after that is logged and left out rather than failing the refresh; so are
-  results beyond the first 1000 created in one and the same second.
+  again in one-page pieces, which cannot shift. If GitHub still leaves something out
+  after that (or more than 1000 repositories were created in one and the same
+  second), the refresh adds what it found to the cache without removing anything,
+  says so, and is not counted as a successful refresh, so the next one tries again.
 - A refresh whose search fails stops there and leaves the cache as it was.
 - The search rate limit is counted per minute (10 requests without a token, 30 with).
   A refresh that runs into it waits for the window to reopen — the dialog shows
   "GitHub rate limit reached. Continuing in N s…", counting down — and carries on;
-  Back still stops it. The wait is timed on GitHub's clock, not the device's. Only a
-  longer wait (the hourly limit) ends the refresh with the rate-limit message.
+  Back still stops it. The wait is timed on GitHub's clock, not the device's. A wait
+  longer than 75 s, or a sixth wait for the same page, ends the refresh with the
+  rate-limit message.
+- README search (the "search in README" filter) runs without a progress dialog, so it
+  is kept short: at most 10 requests per query and no rate-limit waits. A search that
+  fails or matches more than 1000 repositories gives no filter, and the list falls
+  back to matching names and descriptions only.
 - GitHub server errors (5xx) are retried twice, after 1 and 3 seconds. Timeouts are
   not: on a network that is down, retrying would only keep the screen busy longer.
 

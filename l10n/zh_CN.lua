@@ -375,6 +375,7 @@ return {
     ["Refresh stopped. The cache was left as it was."] = "刷新已停止。缓存保持原样。",
     ["Refresh stopped. What was already downloaded has been kept."] = "刷新已停止。已下载的内容予以保留。",
     ["Nothing came back from GitHub. The cache was left as it was."] = "GitHub 未返回任何内容。缓存保持原样。",
+    ["GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."] = "GitHub 未返回所有仓库。已添加新的仓库，未删除任何仓库；下次刷新时将再次尝试。",
     ["The search did not finish. The cache was left as it was."] = "搜索未完成。缓存保持原样。",
     ["Download source: %s"] = "下载源：%s",
     ["Select download source"] = "选择下载源",

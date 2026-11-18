@@ -6964,34 +6964,47 @@ function AppStore:updateReadmeFilter()
 
     local matches = {}
 
+    -- Paged plainly, at most the 1000 results GitHub hands out: this runs on the UI thread,
+    -- with nothing on screen to show a wait or take Back, so it stays at ten requests a query
+    -- at most and does not wait out rate limits. README text matching more than that is no
+    -- filter worth having, and gets none.
     local function addMatchesFromQuery(query)
-        local err = AppStoreSearch.collect(query, {
-            fetch = function(q, page, per_page)
-                return GitHub.searchRepositories({
-                    q = q,
-                    per_page = per_page,
-                    sort = "stars",
-                    order = "desc",
-                    page = page,
-                })
-            end,
-            append = function(repo)
-                local key = repo.full_name or repo.name
-                if not key and repo.owner and repo.name then
-                    local owner = repo.owner.login or repo.owner
-                    if owner and owner ~= "" then
-                        key = tostring(owner) .. "/" .. tostring(repo.name)
+        local per_page = 100
+        for page = 1, math.ceil(AppStoreSearch.RESULT_LIMIT / per_page) do
+            local response, err = GitHub.searchRepositories({
+                q = query,
+                per_page = per_page,
+                sort = "stars",
+                order = "desc",
+                page = page,
+            })
+            if not response then
+                logger.warn("AppStore README search error", query, type(err) == "table" and err.body or err)
+                return false
+            end
+            local total = tonumber(response.total_count) or 0
+            if total > AppStoreSearch.RESULT_LIMIT then
+                logger.info("AppStore README search: too many matches to filter on", query, total)
+                return false
+            end
+            local items = response.items or {}
+            for _, repo in ipairs(items) do
+                if type(repo) == "table" then
+                    local key = repo.full_name or repo.name
+                    if not key and repo.owner and repo.name then
+                        local owner = repo.owner.login or repo.owner
+                        if owner and owner ~= "" then
+                            key = tostring(owner) .. "/" .. tostring(repo.name)
+                        end
+                    end
+                    if key and key ~= "" then
+                        matches[tostring(key)] = true
                     end
                 end
-                if key and key ~= "" then
-                    matches[tostring(key)] = true
-                end
-            end,
-            warn = logger.warn,
-        })
-        if err then
-            logger.warn("AppStore README search error", query, err.body or err)
-            return false
+            end
+            if #items < per_page or page * per_page >= total then
+                break
+            end
         end
         return true
     end
@@ -7008,17 +7021,12 @@ function AppStore:updateReadmeFilter()
         return
     end
 
-    local any_ok = false
+    -- All or nothing: a filter built from one query and part of another would quietly miss
+    -- some that match. A failure leaves readme_filter nil, for local-only matching.
     for _, q in ipairs(queries) do
-        local ok = addMatchesFromQuery(q)
-        if ok then
-            any_ok = true
+        if not addMatchesFromQuery(q) then
+            return
         end
-    end
-
-    if not any_ok then
-        -- Leave readme_filter as nil to fall back to local-only behavior.
-        return
     end
 
     self.readme_filter = {
@@ -9804,8 +9812,9 @@ local function performSearchPage(query, page, per_page)
         end
         -- The search limit is counted per minute (10 requests without a token, 30 with),
         -- and a large refresh runs into it. Waiting the window out and asking again lets the
-        -- refresh finish, only slower; a reset further off than a minute is the hourly core
-        -- limit, or GitHub did not say, and that still ends the refresh with the message.
+        -- refresh finish, only slower. A wait longer than RATE_LIMIT_MAX_WAIT (a long
+        -- Retry-After, a limit other than search's), or more than RATE_LIMIT_MAX_WAITS of
+        -- them for one page, still ends the refresh with the message.
         local delay = not response and GitHub.rateLimitDelay(err, os.time())
         if not delay or delay > AppStore.RATE_LIMIT_MAX_WAIT
             or rate_limit_waits >= AppStore.RATE_LIMIT_MAX_WAITS then
@@ -9819,8 +9828,10 @@ local function performSearchPage(query, page, per_page)
         rate_limit_waits = rate_limit_waits + 1
         logger.info("AppStore: search rate limit reached, waiting", delay, "s")
         local title = progress and progress.title
+        -- Every five seconds rather than every one: each title change repaints the screen,
+        -- and on e-ink that is a flash a second for up to a minute.
         local function countdown(left)
-            if progress then
+            if progress and (left == delay or left % 5 == 0) then
                 progress:setTitle(string.format(_("GitHub rate limit reached. Continuing in %d s…"), left))
             end
         end
@@ -9876,7 +9887,7 @@ local function searchAllBranches(base_query, append)
             return
         end
         local query = base_query .. branch.suffix
-        local err = AppStoreSearch.collect(query, {
+        local err, partial = AppStoreSearch.collect(query, {
             fetch = performSearchPage,
             append = append,
             min_stars = branch.min_stars,
@@ -9888,6 +9899,12 @@ local function searchAllBranches(base_query, append)
         if err and not AppStore.searchWasCancelled(err) then
             AppStore._refresh_search_incomplete = true
             logger.warn("AppStore search error", query, type(err) == "table" and err.body or err)
+        end
+        -- GitHub left something out that could not be made good (see appstore_search):
+        -- what came back is merged into the cache rather than replacing it, and the refresh
+        -- is not stamped healthy, so the next one tries again.
+        if partial then
+            AppStore._refresh_search_partial = true
         end
     end
 end
@@ -9961,7 +9978,8 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries, since_ts)
     if AppStore._refresh_progress and not self:refreshCancelled() then
         AppStore._refresh_progress:setTitle(_("Saving to the cache…"))
     end
-    local write = since_ts and Cache.upsertRepos or Cache.storeRepos
+    -- A partial search is merged: nothing it missed is dropped from the cache.
+    local write = (since_ts or AppStore._refresh_search_partial) and Cache.upsertRepos or Cache.storeRepos
     local stored = write(kind, collected, function(done, total)
         self:reportRefreshProgress(done / total)
     end, function()
@@ -10115,6 +10133,7 @@ function AppStore:refreshCache(kind, opts)
 
     self.is_refreshing = true
     AppStore._refresh_search_incomplete = false
+    AppStore._refresh_search_partial = false
     AppStore._refresh_server_time = nil
     AppStore._refresh_wrote_anything = false
     self.patch_cache = {}
@@ -10205,7 +10224,8 @@ function AppStore:refreshCache(kind, opts)
     -- Stamped last, and only once every earlier step has been confirmed clean: a cancelled,
     -- thrown, incomplete, or refused run must not read as a healthy refresh the next time
     -- this decides between full and incremental mode.
-    local healthy = ok and not cancelled and not AppStore._refresh_search_incomplete and not write_failed
+    local healthy = ok and not cancelled and not AppStore._refresh_search_incomplete
+        and not AppStore._refresh_search_partial and not write_failed
     if healthy then
         -- GitHub's time when the search began (the device's only when no search response
         -- carried one): the next incremental run's `pushed:>=` is measured against it.
@@ -10228,6 +10248,11 @@ function AppStore:refreshCache(kind, opts)
         UIManager:show(InfoMessage:new{ text = _("The search did not finish. The cache was left as it was."), timeout = 6 })
     elseif write_failed then
         UIManager:show(InfoMessage:new{ text = _("Nothing came back from GitHub. The cache was left as it was."), timeout = 5 })
+    elseif AppStore._refresh_search_partial then
+        UIManager:show(InfoMessage:new{
+            text = _("GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."),
+            timeout = 6,
+        })
     else
         -- Deliberately silent: the browser reopens right behind this and states the counts
         -- in its own header, and a popup on top of it was one window too many.

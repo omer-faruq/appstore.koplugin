@@ -424,6 +424,8 @@ A változtatások az újraindítás után lépnek érvénybe.",
     "A keresés nem fejeződött be. A gyorsítótár változatlan maradt.",
     ["Nothing came back from GitHub. The cache was left as it was."] =
     "A GitHub nem küldött vissza semmit. A gyorsítótár változatlan maradt.",
+    ["GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."] =
+        "A GitHub nem adta vissza az összes tárolót. Az újak bekerültek, egyik sem lett törölve; a következő frissítés újra megpróbálja.",
     ["AppStore refresh failed: "] = "Az AppStore frissítése sikertelen: ",
     ["App Store"] = "App Store",
     ["Open AppStore"] = "AppStore megnyitása",

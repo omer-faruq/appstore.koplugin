@@ -1,4 +1,4 @@
--- 394 unique strings
+-- 395 unique strings
 return {
     ["This will take effect on next restart."] = "This will take effect on next restart.",
     ["Restart now"] = "Restart now",
@@ -412,6 +412,7 @@ Changes will take effect after restart.",
     ["AppStore refresh failed: "] = "AppStore refresh failed: ",
     ["The search did not finish. The cache was left as it was."] = "The search did not finish. The cache was left as it was.",
     ["Nothing came back from GitHub. The cache was left as it was."] = "Nothing came back from GitHub. The cache was left as it was.",
+    ["GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."] = "GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again.",
     ["App Store"] = "App Store",
     ["Open AppStore"] = "Open AppStore",
     ["AppStore · Updates"] = "AppStore · Updates",

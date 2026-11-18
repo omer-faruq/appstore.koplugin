@@ -41,6 +41,7 @@ function newFakeGitHub(repos) {
   const gh = { calls: 0, rejected: 0, queries: [] };
   gh.fetch = async (query, page, perPage) => {
     gh.calls++;
+    if (gh.calls > 5000) throw new Error('runaway: over 5000 requests');
     gh.queries.push(query);
     let sLo = 0;
     for (const m of query.matchAll(/stars:>=(\d+)/g)) sLo = Math.max(sLo, Number(m[1]));
@@ -63,7 +64,11 @@ function newFakeGitHub(repos) {
         total++;
       }
     }
+    // `serverClock`: GitHub's time moving on, two seconds a request, as a real Date
+    // header does over a long search. (The page cannot read Date; SearchCore takes
+    // `server_time` all the same, so the behaviour is held to the plugin's.)
     const response = { total_count: total, items };
+    if (gh.serverClock) response.server_time = gh.serverClock + 2 * gh.calls;
     // Hooks for a GitHub that does not stand still: `tamper` edits the answer, `after`
     // changes the data between requests.
     if (gh.tamper) gh.tamper(response, query, page);
@@ -118,20 +123,21 @@ async function run(repos, opts = {}) {
   const gh = newFakeGitHub(repos);
   gh.tamper = opts.tamper;
   gh.after = opts.after;
+  gh.serverClock = opts.serverClock;
   const seen = new Set();
-  let warnings = 0, err = null;
+  let warnings = 0, err = null, partial = false;
   try {
-    await SearchCore.collect('in:name ".koplugin"', {
+    ({ partial } = await SearchCore.collect('in:name ".koplugin"', {
       fetch: opts.fetch ? opts.fetch(gh) : gh.fetch,
       append: repo => seen.add(repo.id),
       minStars: opts.minStars || 0,
       now: opts.now || NOW,
       warn: () => { warnings++; },
-    });
+    }));
   } catch (e) {
     err = e;
   }
-  return { err, unique: seen.size, seen, gh, warnings };
+  return { err, partial: partial === true, unique: seen.size, seen, gh, warnings };
 }
 
 // ── Correctness ────────────────────────────────────────────────────────────
@@ -165,6 +171,7 @@ for (const [label, repos] of [
   check('1500 in one second: no error', r.err, null);
   check('1500 in one second: the reachable 1000 collected', r.unique, 1000);
   check('1500 in one second: warned', r.warnings > 0, true);
+  check('1500 in one second: reported partial', r.partial, true);
   check('1500 in one second: never asked past 1000', r.gh.rejected, 0);
 }
 {
@@ -256,6 +263,7 @@ function byStars(a, b) { return (b.stargazers_count - a.stargazers_count) || (a.
   check('incomplete_results every time: no error', r.err, null);
   check('incomplete_results every time: all collected', r.unique, 2500);
   check('incomplete_results every time: warned', r.warnings > 0, true);
+  check('incomplete_results every time: reported partial', r.partial, true);
   check(`incomplete_results every time: bounded cost (${r.gh.calls})`, r.gh.calls <= 120, true);
 }
 
@@ -272,6 +280,7 @@ for (const zeroShare of [0.6, 0.95]) {
   const label = `unstable tie order (${zeroShare * 100}% at 0 stars)`;
   check(`${label}: no error`, r.err, null);
   check(`${label}: all collected`, r.unique, 3000);
+  check(`${label}: not partial (one-page pieces settle it)`, r.partial, false);
 }
 
 // ── A count GitHub never makes good ────────────────────────────────────────
@@ -280,23 +289,33 @@ for (const zeroShare of [0.6, 0.95]) {
   const r = await run(makeRepos(3000, 0.3, 45), { tamper: response => { response.total_count += 1; } });
   check('count one too high: no error', r.err, null);
   check('count one too high: all collected', r.unique, 3000);
+  check('count one too high: reported partial (no way to tell)', r.partial, true);
   check(`count one too high: at most 2.5x the requests (${r.gh.calls} vs ${plain.gh.calls})`, r.gh.calls <= plain.gh.calls * 2.5, true);
 }
 
 // ── The newest window counted far over what the windows hold ───────────────
-{
+for (const [suffix, serverClock] of [['', null], [", GitHub's clock moving", NOW]]) {
   const r = await run(makeRepos(3000, 0.3, 46), {
+    serverClock,
     tamper: (response, query) => {
       if (query.includes('created:>=') && response.total_count > 0) response.total_count += 1000;
     },
   });
-  check(`inflated open window: stops (${r.gh.calls} requests)`, r.gh.calls <= 80, true);
-  check('inflated open window: reported incomplete', !!(r.err && /do not match/.test(r.err.message)), true);
+  const label = `inflated open window${suffix}`;
+  check(`${label}: stops (${r.gh.calls} requests)`, r.gh.calls <= 80, true);
+  check(`${label}: no error, reported partial`, r.err === null && r.partial, true);
+  check(`${label}: everything there is collected`, r.unique, 3000);
   const bad = r.gh.queries.filter(q => {
-    const m = q.match(/created:>?=?(\d{4})/);
-    return /NaN|Invalid|null|undefined/.test(q) || (m && Number(m[1]) > 2027);
+    const m = q.match(/created:>?=?(\d{4}-\d{2}-\d{2})/);
+    return /NaN|Invalid|null|undefined/.test(q) || (m && Date.parse(m[1]) / 1000 > NOW + 2 * 86400);
   }).length;
-  check('inflated open window: no window in the far future', bad, 0);
+  check(`${label}: no window in the future`, bad, 0);
+}
+
+// ── Cutting a window never makes more pieces than a full window needs ──────
+{
+  const stops = SearchCore.pieceStops([], 0, 1e8, false, 1e6);
+  check(`absurd count: pieces capped (${stops.length + 1})`, stops.length + 1 <= Math.ceil(SearchCore.RESULT_LIMIT / SearchCore.PIECE), true);
 }
 
 // ── Request cost (same limits as the plugin's test where the data is the same) ──
@@ -305,6 +324,7 @@ async function costCase(label, repos, limit, minStars = 0) {
   const want = repos.filter(x => x.stargazers_count >= minStars).length;
   check(`${label}: all collected`, r.unique, want);
   check(`${label}: never asked past 1000`, r.gh.rejected, 0);
+  check(`${label}: not partial`, r.partial, false);
   check(`${label}: at most ${limit} requests (floor ${Math.ceil(want / 100)}, took ${r.gh.calls})`, r.gh.calls <= limit, true);
 }
 await costCase('snapshot non-fork', loadSnapshot('nonfork'), 13);

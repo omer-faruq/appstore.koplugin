@@ -375,6 +375,7 @@ return {
     ["Refresh stopped. The cache was left as it was."] = "Actualización detenida. La caché quedó sin cambios.",
     ["Refresh stopped. What was already downloaded has been kept."] = "Actualización detenida. Se conservó lo ya descargado.",
     ["Nothing came back from GitHub. The cache was left as it was."] = "GitHub no devolvió nada. La caché quedó sin cambios.",
+    ["GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again."] = "GitHub no devolvió todos los repositorios. Se añadieron los nuevos y no se eliminó ninguno; la próxima actualización lo volverá a intentar.",
     ["The search did not finish. The cache was left as it was."] = "La búsqueda no terminó. La caché quedó sin cambios.",
     ["Download source: %s"] = "Origen de descarga: %s",
     ["Select download source"] = "Seleccionar origen de descarga",
