@@ -3066,13 +3066,13 @@ function AppStore:promptUpdateAction(plugin, record)
         end,
     })
 
-    info_box = ConfirmBox:new{
+    info_box = AppStore.ContentConfirmBox:new{
         text = plugin.name or plugin.dirname,
         cancel_text = _("Close"),
         no_ok_button = true,
-        custom_content = makeTextBox(table.concat(lines, "\n")),
         other_buttons = { other_buttons, other_buttons_row2 },
     }
+    info_box:addWidget(makeTextBox(table.concat(lines, "\n")))
     UIManager:show(info_box)
 end
 
@@ -3251,13 +3251,13 @@ function AppStore:promptPatchUpdateAction(patch_item)
         end,
     })
 
-    info_box = ConfirmBox:new{
+    info_box = AppStore.ContentConfirmBox:new{
         text = patch.filename or patch.path or _("Patch"),
         cancel_text = _("Close"),
         no_ok_button = true,
-        custom_content = makeTextBox(table.concat(lines, "\n")),
         other_buttons = { other_buttons, other_buttons_row2 },
     }
+    info_box:addWidget(makeTextBox(table.concat(lines, "\n")))
     UIManager:show(info_box)
 end
 
@@ -4705,14 +4705,14 @@ function AppStore:promptPatchAction(repo, patch)
         }
     end
 
-    dialog = ConfirmBox:new{
+    dialog = AppStore.ContentConfirmBox:new{
         text = repo_title,
         cancel_text = _("Close"),
         no_ok_button = true,
-        custom_content = makeTextBox(table.concat(details, "\n")),
         other_buttons_first = true,
         other_buttons = other_buttons,
     }
+    dialog:addWidget(makeTextBox(table.concat(details, "\n")))
     UIManager:show(dialog)
 end
 
@@ -9473,17 +9473,17 @@ function AppStore:promptRepoAction(repo)
                 end,
             },
         }
-        dialog = ConfirmBox:new{
+        dialog = AppStore.ContentConfirmBox:new{
             text = repo.full_name or repo.name or _("Repository"),
             cancel_text = _("Cancel"),
             no_ok_button = true,
-            custom_content = makeTextBox(table.concat({
-                string.format(_("Match plugin: %s"), plugin.name or plugin.dirname or _("plugin")),
-                formatRepoEntry(repo),
-            }, "\n\n")),
             other_buttons_first = true,
             other_buttons = { buttons_row },
         }
+        dialog:addWidget(makeTextBox(table.concat({
+            string.format(_("Match plugin: %s"), plugin.name or plugin.dirname or _("plugin")),
+            formatRepoEntry(repo),
+        }, "\n\n")))
         UIManager:show(dialog)
         return
     end
