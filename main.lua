@@ -135,16 +135,21 @@ local function getManagePageSize()
     return DEFAULT_MANAGE_PAGE_SIZE
 end
 
+-- Deferred one tick: every caller rebuilds the installed-plugins/patches list
+-- right after calling this, and that rebuilt dialog would otherwise be shown
+-- on top of the prompt and hide it.
 local function showRestartConfirmation(message)
-    UIManager:show(ConfirmBox:new{
-        text = message .. "\n\n" .. _("This will take effect on next restart."),
-        ok_text = _("Restart now"),
-        ok_callback = function()
-            UIManager:restartKOReader()
-        end,
-        cancel_text = _("Restart later"),
-        background = Blitbuffer.COLOR_WHITE,
-    })
+    UIManager:nextTick(function()
+        UIManager:show(ConfirmBox:new{
+            text = message .. "\n\n" .. _("This will take effect on next restart."),
+            ok_text = _("Restart now"),
+            ok_callback = function()
+                UIManager:restartKOReader()
+            end,
+            cancel_text = _("Restart later"),
+            background = Blitbuffer.COLOR_WHITE,
+        })
+    end)
 end
 
 local function getIgnoredReleases()
