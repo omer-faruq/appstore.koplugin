@@ -47,9 +47,13 @@ Search.MAX_DEPTH = 6
 -- its pages, plus a few. Past that, what came back is taken (and the search reported
 -- partial) rather than a GitHub that keeps misbehaving costing without end.
 Search.PIECE_BUDGET = 4
--- How many times "now" may be pushed out (see sweep): doubling from a day, far more
--- than GitHub's whole history needs.
-Search.MAX_PUSHES = 24
+-- What the whole search may cost once it has to sweep: this many times the requests
+-- its count needs, plus a margin. A clean sweep stays near one, and GitHub shuffling
+-- equal-star results between requests -- recoverable, in pieces -- takes up to about
+-- four; counts GitHub keeps getting wrong throw the sweep's arithmetic off, and past
+-- this what is left is taken as far as GitHub hands it out (the search reported partial).
+Search.SWEEP_BUDGET = 5
+Search.SWEEP_MARGIN = 50
 
 -- Seconds since the epoch for GitHub's "2024-01-31T10:00:00Z". Computed rather
 -- than handed to os.time, which would read it as local time.
@@ -180,9 +184,9 @@ local function pieceStops(times, from_ts, to_ts, open, total)
             add(times[i])
         end
     else
-        -- A window paged whole holds under 1000; a count above that is GitHub's, not the
-    -- window's, and must not turn into thousands of pieces.
-    local k = math.ceil(math.min(total, Search.RESULT_LIMIT) / Search.PIECE)
+        -- A window paged whole holds under 1000; a count above that is GitHub's, not
+        -- the window's, and must not turn into thousands of pieces.
+        local k = math.ceil(math.min(total, Search.RESULT_LIMIT) / Search.PIECE)
         for i = 1, k - 1 do
             add(from_ts + math.floor(i * (hi - from_ts + 1) / k) - 1)
         end
@@ -298,6 +302,12 @@ local function fetchRange(ctx, query, from_ts, to_ts, open, depth)
     local count, all = 0, {}
     local lo = from_ts
     for i = 1, #stops + 1 do
+        if ctx.calls >= ctx.budget_end then
+            ctx.partial = true
+            ctx.warn("AppStore search: pieces cost more than their budget, taking what came back",
+                windowed)
+            break
+        end
         local last = i > #stops
         local hi = last and to_ts or stops[i]
         local perr, _, n, t = fetchRange(ctx, query, lo, math.max(hi, lo), last and open, depth + 1)
@@ -309,6 +319,12 @@ local function fetchRange(ctx, query, from_ts, to_ts, open, depth)
             all[#all + 1] = x
         end
         lo = hi + 1
+    end
+    -- The sweep keeps its markers on GitHub's counts of whole windows; the pieces' counts
+    -- added up are not that (each comes with whatever error GitHub's count has), and
+    -- handing their sum back would throw the markers off. The window's own count it is.
+    if depth == 0 then
+        count = r.total
     end
     return nil, false, count, all
 end
@@ -395,17 +411,16 @@ end
 -- `to_ts` is the present as far as it is known. The last marker stands for
 -- everything from the cursor on, and a window ending at it is left open; should
 -- what lies past it still be over the ceiling once the cursor gets there (a clock
--- far behind), the present is pushed out, doubling -- but only as far as there is
--- evidence of: GitHub's time when the search began, or the newest repository seen
--- (a look at the open window's page 1 adds to that when it runs out), and never
--- more than MAX_PUSHES times. With nothing more to go on, the counts disagree with the windows: the
--- open rest is taken as far as GitHub hands it out and the search reported
--- partial, rather than walking windows into the empty future.
+-- far behind), the present is pushed out to where there is evidence of it:
+-- GitHub's time when the search began, or the newest repository seen (a look at
+-- the open window's page 1 adds to that when it runs out). With nothing more to go
+-- on, the counts disagree with the windows: the open rest is taken as far as
+-- GitHub hands it out and the search reported partial, rather than walking windows
+-- into the empty future. The whole sweep is held to SWEEP_BUDGET as well.
 local function sweep(ctx, query, from_ts, to_ts, total)
     local markers = { { stop = to_ts, count = total } }
     local density -- results per second just behind the cursor, once a window is taken
-    local start_ts = from_ts
-    local pushes = 0
+    ctx.sweep_end = ctx.calls + Search.SWEEP_BUDGET * math.ceil(total / Search.PER_PAGE) + Search.SWEEP_MARGIN
     while #markers > 0 do
         -- Ordered by stop, so the counts only grow outwards.
         local j = 0
@@ -417,24 +432,31 @@ local function sweep(ctx, query, from_ts, to_ts, total)
         local base_count = base and base.count or 0
 
         local cut, err, over, count, times
-        if outer and outer.stop == to_ts and outer.stop - base_stop <= 1 then
-            -- Over the ceiling past the present: the present was not the present.
+        if ctx.calls >= ctx.sweep_end then
+            -- Past the whole search's budget: GitHub's counts are too far off to sweep on.
+            ctx.warn("AppStore search: over its request budget, taking what is left as it comes",
+                isoTime(from_ts), query)
+            return takeFirstThousand(ctx, windowQuery(query, from_ts, nil))
+        elseif not base and outer and outer.stop == to_ts and outer.stop - base_stop <= 1 then
+            -- Over the ceiling past the present: the present was not the present. (Only
+            -- once the cursor is there: a counted window still before it is taken first.)
             local limit = math.max(ctx.server_time or 0, ctx.newest or 0) + 86400
-            if to_ts >= limit and pushes < Search.MAX_PUSHES then
+            if to_ts >= limit then
                 err = pageOnce(ctx, windowQuery(query, from_ts, nil), {}, {})
                 limit = math.max(ctx.server_time or 0, ctx.newest or 0) + 86400
             end
             if err then
                 return err
             end
-            if to_ts >= limit or pushes >= Search.MAX_PUSHES then
+            if to_ts >= limit then
                 -- Nothing more to go on: GitHub's counts and its results disagree past here.
                 -- The open rest is taken as far as GitHub hands it out.
                 ctx.warn("AppStore search: counts do not match results past", isoTime(from_ts), query)
                 return takeFirstThousand(ctx, windowQuery(query, from_ts, nil))
             end
-            pushes = pushes + 1
-            to_ts = math.min(to_ts + math.max(86400, to_ts - start_ts), limit)
+            -- Straight to where the evidence says: creeping out from a clock years behind,
+            -- a day and then double, would spend the sweep's budget on empty windows.
+            to_ts = limit
             outer.stop = to_ts
         elseif not outer or base_count >= Search.AIM or outer.stop - base_stop <= 1 then
             if base then

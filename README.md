@@ -256,6 +256,12 @@ configured interval, not permanent.
   after that (or more than 1000 repositories were created in one and the same
   second), the refresh adds what it found to the cache without removing anything,
   says so, and is not counted as a successful refresh, so the next one tries again.
+  The third such refresh in a row is taken as the list if it found at least 90% of
+  what the cache holds, so a GitHub that keeps miscounting cannot keep removed
+  repositories in the cache for good, nor shrink it.
+- If GitHub's counts are so far off that the search would cost more than about five
+  times its usual requests, it stops cutting, takes what GitHub hands out for the
+  rest, and reports the refresh as partial as above.
 - A refresh whose search fails stops there and leaves the cache as it was.
 - The search rate limit is counted per minute (10 requests without a token, 30 with).
   A refresh that runs into it waits for the window to reopen — the dialog shows

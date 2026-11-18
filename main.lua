@@ -6970,6 +6970,7 @@ function AppStore:updateReadmeFilter()
     -- filter worth having, and gets none.
     local function addMatchesFromQuery(query)
         local per_page = 100
+        local got, total = 0, 0
         for page = 1, math.ceil(AppStoreSearch.RESULT_LIMIT / per_page) do
             local response, err = GitHub.searchRepositories({
                 q = query,
@@ -6982,12 +6983,17 @@ function AppStore:updateReadmeFilter()
                 logger.warn("AppStore README search error", query, type(err) == "table" and err.body or err)
                 return false
             end
-            local total = tonumber(response.total_count) or 0
+            total = tonumber(response.total_count) or 0
             if total > AppStoreSearch.RESULT_LIMIT then
                 logger.info("AppStore README search: too many matches to filter on", query, total)
                 return false
             end
+            if response.incomplete_results == true then
+                logger.info("AppStore README search: GitHub flagged the results incomplete", query)
+                return false
+            end
             local items = response.items or {}
+            got = got + #items
             for _, repo in ipairs(items) do
                 if type(repo) == "table" then
                     local key = repo.full_name or repo.name
@@ -7005,6 +7011,12 @@ function AppStore:updateReadmeFilter()
             if #items < per_page or page * per_page >= total then
                 break
             end
+        end
+        -- Pages that do not add up to the count shifted while being read: some match is
+        -- missing, and a filter missing it is no filter.
+        if got < total then
+            logger.info("AppStore README search: pages did not add up", query, got, total)
+            return false
         end
         return true
     end
@@ -9830,8 +9842,10 @@ local function performSearchPage(query, page, per_page)
         local title = progress and progress.title
         -- Every five seconds rather than every one: each title change repaints the screen,
         -- and on e-ink that is a flash a second for up to a minute.
+        local shown
         local function countdown(left)
-            if progress and (left == delay or left % 5 == 0) then
+            if progress and left ~= shown and (left == delay or left % 5 == 0 or left < 5) then
+                shown = left
                 progress:setTitle(string.format(_("GitHub rate limit reached. Continuing in %d s…"), left))
             end
         end
@@ -9978,7 +9992,25 @@ function AppStore:fetchAndStore(kind, topics, label, name_queries, since_ts)
     if AppStore._refresh_progress and not self:refreshCancelled() then
         AppStore._refresh_progress:setTitle(_("Saving to the cache…"))
     end
-    -- A partial search is merged: nothing it missed is dropped from the cache.
+    -- A partial search is merged: nothing it missed is dropped from the cache. Unless it is
+    -- the PARTIAL_ACCEPT_AFTER-th in a row: GitHub that never hands out what it counts would
+    -- otherwise keep every refresh partial for good -- deleted repositories never leaving
+    -- the cache, every run a full one, the warning every time. That one is taken as the list
+    -- -- provided it is close to what the cache holds (PARTIAL_ACCEPT_SHARE): counts that far
+    -- off left whole stretches unread, and replacing the cache with that would lose them.
+    -- An incremental run only adds to the cache, so for it the stamp is all that changes.
+    if AppStore._refresh_search_partial then
+        local streak_key = "refresh_partial_streak_" .. kind
+        local streak = (tonumber(AppStoreSettings:readSetting(streak_key)) or 0) + 1
+        local close_enough = since_ts ~= nil or #collected >= AppStore.PARTIAL_ACCEPT_SHARE * expected
+        if streak >= AppStore.PARTIAL_ACCEPT_AFTER and close_enough then
+            logger.warn("AppStore: search partial", streak, "times in a row; taking it as the", kind, "list")
+            AppStore._refresh_search_partial = false
+            streak = 0
+        end
+        AppStoreSettings:saveSetting(streak_key, streak)
+        AppStoreSettings:flush()
+    end
     local write = (since_ts or AppStore._refresh_search_partial) and Cache.upsertRepos or Cache.storeRepos
     local stored = write(kind, collected, function(done, total)
         self:reportRefreshProgress(done / total)
@@ -10041,8 +10073,14 @@ function AppStore:getLastRefreshOkAt(kind)
     return tonumber(AppStoreSettings:readSetting("last_refresh_ok_at_" .. kind))
 end
 
+-- How many partial refreshes in a row before one is taken as the list, and how much of the
+-- cache it must hold to be (see fetchAndStore).
+AppStore.PARTIAL_ACCEPT_AFTER = 3
+AppStore.PARTIAL_ACCEPT_SHARE = 0.9
+
 function AppStore:markRefreshOk(kind, is_full, at)
     at = at or os.time()
+    AppStoreSettings:saveSetting("refresh_partial_streak_" .. kind, 0)
     AppStoreSettings:saveSetting("last_refresh_ok_at_" .. kind, at)
     if is_full then
         AppStoreSettings:saveSetting("last_full_refresh_ok_at_" .. kind, at)
@@ -10208,7 +10246,9 @@ function AppStore:refreshCache(kind, opts)
         end
         -- This line lives on in the browser header, so it must not describe a run that did
         -- not finish, nor claim "Cached 0 plugins." over rows that were never replaced.
-        if not self:refreshCancelled() and not write_failed then
+        -- Nor after a partial run, merged into the cache: its count is this run's, not the
+        -- cache's.
+        if not self:refreshCancelled() and not write_failed and not AppStore._refresh_search_partial then
             AppStoreSettings:saveSetting("status_text", summary)
             AppStoreSettings:flush()
         end

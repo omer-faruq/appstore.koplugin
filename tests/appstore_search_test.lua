@@ -543,6 +543,56 @@ for _, clock in ipairs({ { "", nil }, { ", GitHub's clock moving", NOW } }) do
     check(label .. ": no window in the future", bad, 0)
 end
 
+-- ── Every count inflated: the whole search has a request limit ──────────────
+-- GitHub's counts badly off everywhere wreck the sweep's arithmetic; without a
+-- limit on the whole search it ran to thousands of one-request windows.
+do
+    local repos = makeRepos(3000, 0.3, 47)
+    local r = run(repos, {
+        tamper = function(response)
+            if response.total_count > 0 then
+                response.total_count = response.total_count + 500
+            end
+        end,
+    })
+    check("every count +500: no error", r.err, nil)
+    check("every count +500: bounded (" .. r.gh.calls .. " requests)", r.gh.calls <= 300, true)
+    check("every count +500: reported partial", r.partial, true)
+end
+
+-- ── The give-up paths report partial ────────────────────────────────────────
+-- Multi-page answers lose their last item; one-page pieces come back whole. With
+-- room to cut, the pieces settle it; without, what came back is taken -- and the
+-- search must say it is partial.
+local function dropOnMultiPage(response)
+    if response.total_count > Search.PER_PAGE and #response.items > 0 then
+        table.remove(response.items)
+    end
+end
+do
+    local r = run(makeRepos(2500, 0.3, 48), { tamper = dropOnMultiPage })
+    check("multi-page answers short: pieces settle it", r.unique, 2500)
+    check("multi-page answers short: not partial", r.partial, false)
+end
+do
+    local saved = Search.MAX_DEPTH
+    Search.MAX_DEPTH = 0
+    local r = run(makeRepos(2500, 0.3, 48), { tamper = dropOnMultiPage })
+    Search.MAX_DEPTH = saved
+    check("no cutting allowed: reported partial", r.partial, true)
+    check("no cutting allowed: no error", r.err, nil)
+end
+do
+    local saved = Search.PIECE_BUDGET
+    Search.PIECE_BUDGET = 0
+    local plain = run(makeRepos(2500, 0.3, 48), { tamper = dropOnMultiPage })
+    Search.PIECE_BUDGET = saved
+    local full = run(makeRepos(2500, 0.3, 48), { tamper = dropOnMultiPage })
+    check("piece budget spent: reported partial", plain.partial, true)
+    check(string.format("piece budget spent: fewer requests (%d vs %d)", plain.gh.calls, full.gh.calls),
+        plain.gh.calls < full.gh.calls, true)
+end
+
 -- ── Cutting a window never makes more pieces than a full window needs ───────
 do
     local stops = Search._pieceStops({}, 0, 10 ^ 8, false, 10 ^ 6)

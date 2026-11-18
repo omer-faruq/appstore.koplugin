@@ -312,6 +312,43 @@ for (const [suffix, serverClock] of [['', null], [", GitHub's clock moving", NOW
   check(`${label}: no window in the future`, bad, 0);
 }
 
+// ── Every count inflated: the whole search has a request limit ─────────────
+{
+  const r = await run(makeRepos(3000, 0.3, 47), {
+    tamper: response => { if (response.total_count > 0) response.total_count += 500; },
+  });
+  check('every count +500: no error', r.err, null);
+  check(`every count +500: bounded (${r.gh.calls} requests)`, r.gh.calls <= 300, true);
+  check('every count +500: reported partial', r.partial, true);
+}
+
+// ── The give-up paths report partial ───────────────────────────────────────
+function dropOnMultiPage(response) {
+  if (response.total_count > SearchCore.PER_PAGE && response.items.length > 0) response.items.pop();
+}
+{
+  const r = await run(makeRepos(2500, 0.3, 48), { tamper: dropOnMultiPage });
+  check('multi-page answers short: pieces settle it', r.unique, 2500);
+  check('multi-page answers short: not partial', r.partial, false);
+}
+{
+  const saved = SearchCore.MAX_DEPTH;
+  SearchCore.MAX_DEPTH = 0;
+  const r = await run(makeRepos(2500, 0.3, 48), { tamper: dropOnMultiPage });
+  SearchCore.MAX_DEPTH = saved;
+  check('no cutting allowed: reported partial', r.partial, true);
+  check('no cutting allowed: no error', r.err, null);
+}
+{
+  const saved = SearchCore.PIECE_BUDGET;
+  SearchCore.PIECE_BUDGET = 0;
+  const plain = await run(makeRepos(2500, 0.3, 48), { tamper: dropOnMultiPage });
+  SearchCore.PIECE_BUDGET = saved;
+  const full = await run(makeRepos(2500, 0.3, 48), { tamper: dropOnMultiPage });
+  check('piece budget spent: reported partial', plain.partial, true);
+  check(`piece budget spent: fewer requests (${plain.gh.calls} vs ${full.gh.calls})`, plain.gh.calls < full.gh.calls, true);
+}
+
 // ── Cutting a window never makes more pieces than a full window needs ──────
 {
   const stops = SearchCore.pieceStops([], 0, 1e8, false, 1e6);

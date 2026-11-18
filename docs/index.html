@@ -821,7 +821,11 @@ const SearchCore = {
   PIECE: 90, // a window that does not add up is fetched again in pieces of about one page
   MAX_DEPTH: 6, // how many times it is cut that way before what came back is taken
   PIECE_BUDGET: 4, // what the pieces may cost: this many times the window's pages, plus a few
-  MAX_PUSHES: 24, // how many times "now" may be pushed out (see sweep)
+  // What the whole sweep may cost: this many times the requests its count needs, plus a
+  // margin. Counts GitHub keeps getting wrong throw the sweep's arithmetic off; past this
+  // what is left is taken as GitHub hands it out, the search partial.
+  SWEEP_BUDGET: 5,
+  SWEEP_MARGIN: 50,
 
   isoTime(ts) { return new Date(ts * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'); },
   parseIso(s) {
@@ -968,6 +972,11 @@ const SearchCore = {
     const all = [];
     let lo = from;
     for (let i = 0; i <= stops.length; i++) {
+      if (ctx.calls >= ctx.budgetEnd) {
+        ctx.partial = true;
+        ctx.warn(`Search pieces cost more than their budget, taking what came back: ${windowed}`);
+        break;
+      }
       const last = i === stops.length;
       const hi = last ? to : stops[i];
       const piece = await this.fetchRange(ctx, query, lo, Math.max(hi, lo), last && open, depth + 1);
@@ -975,6 +984,9 @@ const SearchCore = {
       all.push(...piece.times);
       lo = hi + 1;
     }
+    // The sweep's markers are kept on GitHub's counts of whole windows: the window's own
+    // count goes back, not the pieces' counts added up (each with its own error).
+    if (depth === 0) count = r.total;
     return { over: false, count, times: all };
   },
 
@@ -1020,15 +1032,14 @@ const SearchCore = {
 
   // `to` is the present as far as it is known: the last marker stands for everything from
   // the cursor on, and a window ending at it is left open. Still over the ceiling past it
-  // once the cursor gets there, the present is pushed out, doubling, but only as far as
-  // there is evidence of (GitHub's time when the search began, the newest repository seen,
-  // a look at the open window's page 1), and at most MAX_PUSHES times; with nothing more
-  // to go on, the open rest is taken as far as GitHub hands it out, the search partial.
+  // once the cursor gets there, the present is pushed out to where there is evidence of it
+  // (GitHub's time when the search began, the newest repository seen, a look at the open
+  // window's page 1); with nothing more to go on, the open rest is taken as far as GitHub
+  // hands it out, the search partial. The whole sweep is held to SWEEP_BUDGET as well.
   async sweep(ctx, query, from, to, total) {
     let markers = [{ stop: to, count: total }];
     let density = null;
-    const start = from;
-    let pushes = 0;
+    ctx.sweepEnd = ctx.calls + this.SWEEP_BUDGET * Math.ceil(total / this.PER_PAGE) + this.SWEEP_MARGIN;
     while (markers.length > 0) {
       let j = 0;
       while (j < markers.length && markers[j].count < this.RESULT_LIMIT) j++;
@@ -1037,21 +1048,28 @@ const SearchCore = {
       const baseStop = base ? base.stop : from - 1;
       const baseCount = base ? base.count : 0;
 
-      if (outer && outer.stop === to && outer.stop - baseStop <= 1) {
-        // Over the ceiling past the present: the present was not the present.
+      if (ctx.calls >= ctx.sweepEnd) {
+        // Past the whole search's budget: GitHub's counts are too far off to sweep on.
+        ctx.warn(`Search over its request budget, taking what is left as it comes: ${query} from ${this.isoTime(from)}`);
+        await this.takeFirstThousand(ctx, this.windowQuery(query, from, null));
+        return;
+      }
+      if (!base && outer && outer.stop === to && outer.stop - baseStop <= 1) {
+        // Over the ceiling past the present: the present was not the present. (Only once
+        // the cursor is there: a counted window still before it is taken first.)
         let limit = Math.max(ctx.serverTime || 0, ctx.newest || 0) + 86400;
-        if (to >= limit && pushes < this.MAX_PUSHES) {
+        if (to >= limit) {
           await this.pageOnce(ctx, this.windowQuery(query, from, null), new Set(), []);
           limit = Math.max(ctx.serverTime || 0, ctx.newest || 0) + 86400;
         }
-        if (to >= limit || pushes >= this.MAX_PUSHES) {
+        if (to >= limit) {
           // Nothing more to go on: GitHub's counts and its results disagree past here.
           ctx.warn(`Search counts do not match results past ${this.isoTime(from)}: ${query}`);
           await this.takeFirstThousand(ctx, this.windowQuery(query, from, null));
           return;
         }
-        pushes++;
-        to = Math.min(to + Math.max(86400, to - start), limit);
+        // Straight to where the evidence says, not creeping out a day and then double.
+        to = limit;
         outer.stop = to;
         continue;
       }
@@ -1384,6 +1402,9 @@ const app = {
   data: { plugins: null, patches: null },
   loading: { plugins: false, patches: false },
   readmeLoading: {},
+  // Partial refreshes in a row before one is taken as the list (see refreshData).
+  PARTIAL_ACCEPT_AFTER: 3,
+  PARTIAL_ACCEPT_SHARE: 0.9, // ... and only when it holds this much of the stored list
 
   QUERIES: {
     plugins: {
@@ -1557,7 +1578,8 @@ const app = {
     // Without a token, GitHub's 10 req/min search cap is easily hit and some
     // sub-queries fail silently otherwise, producing a partial repo list.
     const errors = [];
-    let totalQueries = 0;
+    // Every query planned, not only those tried before a failure stopped the rest.
+    const totalQueries = allBaseQueries.length * 2;
     let partial = false;
     const add = repos => {
       for (const repo of repos) {
@@ -1569,13 +1591,11 @@ const app = {
       }
     };
 
-    // Stops at the first failure, as the plugin does: the list is merged rather than
-    // replaced from then on, and every further query would only cost more requests (and
-    // rate-limit waits) for a result that is partial anyway.
+    // Stops at the first failure, as the plugin does: the stored list is then left as it
+    // was, and every further query would only cost more requests (and rate-limit waits).
     outer:
     for (const baseQ of allBaseQueries) {
       for (const { q, minStars } of this.searchBranches(baseQ)) {
-        totalQueries++;
         try {
           const found = await GitHub.exhaustiveSearch(q, minStars);
           add(found.repos);
@@ -1596,9 +1616,13 @@ const app = {
     this.loading[active] = true;
     this.render();
 
-    // Kept until the new list is in: a refresh that fails or comes back partial merges into
-    // it rather than replacing it, as the plugin does with its cache.
+    // Kept until the new list is in, and handled as the plugin handles its cache: a failed
+    // search leaves it as it was; a partial one is merged into it (nothing dropped), unless
+    // it is the PARTIAL_ACCEPT_AFTER-th partial in a row, which is taken as the list.
     const previous = Storage.getJSON(`cache_${active}`);
+    const usable = !!(previous && Array.isArray(previous.repos)
+      && previous.withZeroStarForks === this.includeZeroStarForks);
+    const streakKey = `partial_streak_${active}`;
     // If README search is about to run, defer list-fetch errors so both sets
     // can be shown together in a single alert instead of two popups.
     const willReadmeSearch = this.ts.readmeSearch && this.ts.query;
@@ -1606,18 +1630,34 @@ const app = {
       const { repos: fullRepos, errors, totalQueries, partial } = await this.fetchCategory(active);
       // Slim the in-memory copy too, so fresh and cached data behave identically.
       let repos = fullRepos.map(slimRepo);
-      const incomplete = partial || (errors && errors.length > 0);
-      if (incomplete && previous && Array.isArray(previous.repos)
-          && previous.withZeroStarForks === this.includeZeroStarForks) {
-        // New and updated repositories added, none dropped; the old timestamp stays.
-        const byName = new Map(previous.repos.map(r => [r.full_name.toLowerCase(), r]));
-        for (const r of repos) byName.set(r.full_name.toLowerCase(), r);
-        repos = [...byName.values()];
-        Storage.setJSON(`cache_${active}`, { ...previous, repos });
+      const failed = !!(errors && errors.length > 0);
+      const fresh = list => ({ repos: list, ts: Date.now(), withZeroStarForks: this.includeZeroStarForks });
+      if (failed && usable) {
+        repos = previous.repos;
+      } else if (partial && usable) {
+        const streak = (Number(Storage.get(streakKey)) || 0) + 1;
+        // Only when close to what is stored: counts far off left whole stretches unread.
+        if (streak >= this.PARTIAL_ACCEPT_AFTER && repos.length >= this.PARTIAL_ACCEPT_SHARE * previous.repos.length) {
+          console.warn(`Search partial ${streak} times in a row; taking it as the list.`);
+          Storage.setJSON(`cache_${active}`, fresh(repos));
+          Storage.set(streakKey, '0');
+        } else {
+          // New and updated repositories added, none dropped; the old timestamp stays.
+          const byName = new Map(previous.repos.map(r => [r.full_name.toLowerCase(), r]));
+          for (const r of repos) byName.set(r.full_name.toLowerCase(), r);
+          repos = [...byName.values()];
+          Storage.setJSON(`cache_${active}`, { ...previous, repos });
+          Storage.set(streakKey, String(streak));
+          this.showToast('GitHub did not return every repository. New ones were added and none were removed; the next refresh will try again.', 10000);
+        }
+      } else if (failed || partial) {
+        // Nothing usable stored: what came back is all there is. Kept without a timestamp,
+        // so "Last fetched" does not pass it off as a complete fetch.
+        Storage.setJSON(`cache_${active}`, { ...fresh(repos), ts: null });
       } else {
-        Storage.setJSON(`cache_${active}`, { repos, ts: Date.now(), withZeroStarForks: this.includeZeroStarForks });
+        Storage.setJSON(`cache_${active}`, fresh(repos));
+        Storage.set(streakKey, '0');
       }
-      if (partial) console.warn('GitHub did not return every repository; the list was merged, not replaced.');
       this.data[active] = repos;
       if (errors && errors.length > 0) {
         if (willReadmeSearch) {
