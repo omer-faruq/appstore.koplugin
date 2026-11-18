@@ -138,6 +138,12 @@ end
 -- Deferred one tick: every caller rebuilds the installed-plugins/patches list
 -- right after calling this, and that rebuilt dialog would otherwise be shown
 -- on top of the prompt and hide it.
+-- For a ConfirmBox that carries widgets added with addWidget. Simple UI (a third-party
+-- plugin) redraws every plain ConfirmBox shown in the file manager in its own style; that
+-- copy drops the added widgets, and it is not modal, so over an open modal dialog (the
+-- download options) it lands behind it. It leaves subclasses alone, hence this one.
+AppStore.ContentConfirmBox = ConfirmBox:extend{}
+
 local function showRestartConfirmation(message)
     UIManager:nextTick(function()
         UIManager:show(ConfirmBox:new{
@@ -3663,7 +3669,7 @@ function AppStore:deletePlugin(dirname, record)
     
     local delete_settings = false
     local confirm_box
-    confirm_box = ConfirmBox:new{
+    confirm_box = AppStore.ContentConfirmBox:new{
         text = string.format(_("Delete plugin '%s'?\n\nThis action cannot be undone.\n\nChanges will take effect after restart."), display_name),
         ok_text = _("Delete"),
         ok_callback = function()
@@ -5888,7 +5894,7 @@ function AppStore:promptPluginInstallOptions(repo, release_override)
             table.insert(buttons, {
                 text = _("View release notes"),
                 callback = function()
-                    local notes_dialog = ConfirmBox:new{
+                    local notes_dialog = AppStore.ContentConfirmBox:new{
                         text = _("Release notes"),
                         cancel_text = _("Close"),
                         no_ok_button = true,
@@ -8819,7 +8825,7 @@ function AppStore:showPatchRepoActionDialog(repo, entries)
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.format(_("Patches found: %d"), #entries)
     
-    dialog = ConfirmBox:new{
+    dialog = AppStore.ContentConfirmBox:new{
         text = repo.full_name or repo.name or _("Repository"),
         cancel_text = _("Close"),
         no_ok_button = true,
@@ -9513,7 +9519,7 @@ function AppStore:promptRepoAction(repo)
         lines[#lines + 1] = string.format(_("Updated: %s"), ts:sub(1, 10))
     end
 
-    dialog = ConfirmBox:new{
+    dialog = AppStore.ContentConfirmBox:new{
         text = repo.full_name or repo.name or _("Repository"),
         cancel_text = _("Close"),
         no_ok_button = true,
