@@ -446,15 +446,84 @@ do
     check("incomplete_results once: all collected", r.unique, 2500)
 end
 do
-    -- And keeps saying so: what came back is partial, and the search must say that
-    -- rather than pass it off as everything.
-    local repos = makeRepos(300, 0.3, 42)
+    -- And keeps saying so, though nothing is missing: taken with a warning. A flag
+    -- GitHub keeps raising on a broad query must not fail every refresh for good.
+    local repos = makeRepos(2500, 0.3, 42)
     local r = run(repos, {
         tamper = function(response)
             response.incomplete_results = true
         end,
     })
-    check("incomplete_results every time: an error, not a quiet partial result", r.err ~= nil, true)
+    check("incomplete_results every time: no error", r.err, nil)
+    check("incomplete_results every time: all collected", r.unique, 2500)
+    check("incomplete_results every time: warned", r.warnings > 0, true)
+    check("incomplete_results every time: bounded cost (" .. r.gh.calls .. ")", r.gh.calls <= 120, true)
+end
+
+-- ── Ties in a different order on every request ─────────────────────────────
+-- Repositories with the same star count have no order of their own; should GitHub
+-- hand them out differently from one request to the next, paging a window skips
+-- some and repeats others however often it is paged. Only a window that fits on
+-- one page is immune, so that is what a window that does not add up is cut into.
+local function reshuffleTies(seed)
+    local pick = rng(seed)
+    return function(list)
+        for _, repo in ipairs(list) do
+            repo.tie = pick(2147483647)
+        end
+        table.sort(list, function(a, b)
+            if a.stargazers_count ~= b.stargazers_count then
+                return a.stargazers_count > b.stargazers_count
+            end
+            return a.tie < b.tie
+        end)
+    end
+end
+for _, zero_share in ipairs({ 0.6, 0.95 }) do
+    local repos = makeRepos(3000, zero_share, 43)
+    local r = run(repos, { after = reshuffleTies(44) })
+    local label = string.format("unstable tie order (%d%% at 0 stars)", zero_share * 100)
+    check(label .. ": no error", r.err, nil)
+    check(label .. ": all collected", r.unique, 3000)
+end
+
+-- ── A count GitHub never makes good ─────────────────────────────────────────
+-- One more counted than returned, on every response: nothing is missing, there
+-- is just no way to tell. Taken with a warning, at a bounded extra cost.
+do
+    local plain = run(makeRepos(3000, 0.3, 45))
+    local r = run(makeRepos(3000, 0.3, 45), {
+        tamper = function(response)
+            response.total_count = response.total_count + 1
+        end,
+    })
+    check("count one too high: no error", r.err, nil)
+    check("count one too high: all collected", r.unique, 3000)
+    check(string.format("count one too high: at most 2.5x the requests (%d vs %d)", r.gh.calls, plain.gh.calls),
+        r.gh.calls <= plain.gh.calls * 2.5, true)
+end
+
+-- ── The newest window counted far over what the windows hold ────────────────
+-- The present is pushed out only as far as there is evidence of: GitHub's time, or
+-- the newest repository seen. Past that the search ends incomplete, rather than
+-- walking windows into the empty future (and past the year os.date can print).
+do
+    local repos = makeRepos(3000, 0.3, 46)
+    local r = run(repos, {
+        tamper = function(response, query)
+            if query:find("created:>=", 1, true) and response.total_count > 0 then
+                response.total_count = response.total_count + 1000
+            end
+        end,
+    })
+    check("inflated open window: stops (" .. r.gh.calls .. " requests)", r.gh.calls <= 80, true)
+    check("inflated open window: reported incomplete", type(r.err) == "table" and r.err.incomplete, true)
+    local bad = 0
+    for _, q in ipairs(r.gh.queries) do
+        local y = q:match("created:[>=]*(%d%d%d%d)")
+        if q:find("nil", 1, true) or (y and tonumber(y) > 2027) then bad = bad + 1 end
+    end
+    check("inflated open window: no window in the far future", bad, 0)
 end
 
 if failures > 0 then

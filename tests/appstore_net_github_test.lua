@@ -122,9 +122,30 @@ do
 end
 
 do
-    reset({ { code = 403, body = "{}" } })
+    -- A 429 is a rate limit whatever its headers; without them, GitHub asks for a minute.
+    reset({ { code = 429, body = "{}" } })
     local _, err = GitHub.searchRepositories({ q = "x" })
-    check("rate limit without headers: no known wait", GitHub.rateLimitDelay(err, 1700000000), nil)
+    check("429 without headers: a rate limit", err and err.is_rate_limit, true)
+    check("429 without headers: a minute's wait", GitHub.rateLimitDelay(err, 1700000000), 60)
+end
+
+do
+    -- Out of requests with no reset given: a minute, as the site does.
+    reset({ { code = 403, body = "{}", headers = { ["x-ratelimit-remaining"] = "0" } } })
+    local _, err = GitHub.searchRepositories({ q = "x" })
+    check("403 out of requests, no reset: a minute's wait", GitHub.rateLimitDelay(err, 1700000000), 60)
+end
+
+-- ── Fine-grained tokens, which search refuses ───────────────────────────────
+do
+    reset({ {
+        code = 403,
+        body = '{"message":"Fine-grained personal access tokens are not supported for this endpoint."}',
+        headers = { ["x-ratelimit-remaining"] = "29" },
+    } })
+    local _, err = GitHub.searchRepositories({ q = "x" })
+    check("fine-grained token: recognised", err and err.is_fine_grained_unsupported, true)
+    check("fine-grained token: not a rate limit", err and err.is_rate_limit, false)
 end
 
 do

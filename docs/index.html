@@ -818,7 +818,8 @@ const SearchCore = {
   PER_PAGE: 100,
   AIM: 900,
   ORIGIN_TS: 1191196800, // 2007-10-01, before GitHub existed
-  WINDOW_ATTEMPTS: 3, // pagings of a window before what came back is taken as it is
+  PIECE: 90, // a window that does not add up is fetched again in pieces of about one page
+  MAX_DEPTH: 6, // how many times it is cut that way before what came back is taken
 
   isoTime(ts) { return new Date(ts * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'); },
   parseIso(s) {
@@ -833,65 +834,71 @@ const SearchCore = {
   },
 
   // Appends a response's results; returns how many this pass had not seen (keyed by id).
+  // The newest creation time seen anywhere is kept in ctx.newest: evidence of "now".
   takeItems(ctx, items, seen, times) {
     let fresh = 0;
     for (const repo of items) {
       if (!repo || typeof repo !== 'object') continue;
       ctx.append(repo);
+      const t = this.parseIso(repo.created_at);
+      if (t !== null && t > (ctx.newest || 0)) ctx.newest = t;
       const key = repo.id ?? repo.full_name;
       if (key == null || !seen.has(key)) {
         if (key != null) seen.add(key);
         fresh++;
-        const t = this.parseIso(repo.created_at);
         if (t !== null) times.push(t);
       }
     }
     return fresh;
   },
 
-  // Page through [from, to] (`to` null: from on). { over: true, count } when it holds 1000
-  // or more (known from page 1, whose results are kept all the same); otherwise
-  // { over: false, count, times }. Pages shift under a deletion or a star between two of
-  // them, and GitHub flags a search that ran out of time `incomplete_results`; when the
-  // pages do not add up to the highest count seen, the window is paged again. Still short
-  // after WINDOW_ATTEMPTS: flagged incomplete throws, a count that never adds up is taken.
-  async fetchWindow(ctx, query, from, to) {
-    const windowed = this.windowQuery(query, from, to);
-    let total = 0, times = [], incomplete = false;
-    for (let attempt = 1; attempt <= this.WINDOW_ATTEMPTS; attempt++) {
-      const seen = new Set();
-      let got = 0, most = 0;
-      times = [];
-      incomplete = false;
-      for (let page = 1; ; page++) {
-        const res = await ctx.fetch(windowed, page, this.PER_PAGE);
-        if (Number(res.server_time) > 0) ctx.serverTime = Number(res.server_time);
-        total = Number(res.total_count) || 0;
-        most = Math.max(most, total);
-        if (res.incomplete_results === true) incomplete = true;
-        const items = res.items || [];
-        got += this.takeItems(ctx, items, seen, times);
-        // Ten full pages of a window counted under the ceiling: it grew while being paged.
-        if ((page === 1 && total >= this.RESULT_LIMIT)
-            || (items.length === this.PER_PAGE && page * this.PER_PAGE >= this.RESULT_LIMIT)) {
-          return { over: true, count: Math.max(total, this.RESULT_LIMIT) };
-        }
-        if (items.length < this.PER_PAGE || page * this.PER_PAGE >= total) break;
+  // Page through `windowed` once: { over, total } when page 1 counts 1000 or more (or ten
+  // full pages came anyway); else { total, got, incomplete, short }. Short is measured
+  // against the highest count seen during the pass: a repository deleted after it was
+  // seen lowers the count as much as the one it pushed past unseen.
+  async pageOnce(ctx, windowed, seen, times) {
+    let got = 0, most = 0, total = 0, incomplete = false;
+    for (let page = 1; ; page++) {
+      const res = await ctx.fetch(windowed, page, this.PER_PAGE);
+      if (Number(res.server_time) > 0) ctx.serverTime = Number(res.server_time);
+      total = Number(res.total_count) || 0;
+      most = Math.max(most, total);
+      if (res.incomplete_results === true) incomplete = true;
+      const items = res.items || [];
+      got += this.takeItems(ctx, items, seen, times);
+      if ((page === 1 && total >= this.RESULT_LIMIT)
+          || (items.length === this.PER_PAGE && page * this.PER_PAGE >= this.RESULT_LIMIT)) {
+        return { over: true, total: Math.max(total, this.RESULT_LIMIT) };
       }
-      if (got >= most && !incomplete) return { over: false, count: total, times };
-      ctx.warn(`Search window came back short (${got} of ${most}${incomplete ? ', incomplete_results' : ''}), paging it again: ${windowed}`);
+      if (items.length < this.PER_PAGE || page * this.PER_PAGE >= total) break;
     }
-    if (incomplete) throw new Error(`GitHub returned incomplete search results for ${windowed}`);
-    return { over: false, count: total, times };
+    return { over: false, total, got, incomplete, short: incomplete || got < most };
   },
 
-  // Results per second just before `to`, from the newer half of a window taken whole.
-  densityBefore(times, from, to) {
-    const n = times.length;
-    if (n < 20) return n / Math.max(1, to - from + 1);
+  // Where to cut [from, to] (`open`: no upper end, `to` a guide) into pieces of about
+  // PIECE results: at the creation times seen, or evenly in time when far fewer came back
+  // than were counted; halved when neither gives a cut. Null for a single second.
+  pieceStops(times, from, to, open, total) {
     times.sort((a, b) => a - b);
-    const mid = Math.floor(n / 2);
-    return (n - mid) / Math.max(1, to - times[mid - 1] + 1);
+    const hi = open ? Math.max(to, times.length ? times[times.length - 1] : to) : to;
+    const lastStop = open ? hi : to - 1;
+    const stops = [];
+    const add = stop => {
+      const prev = stops.length ? stops[stops.length - 1] : from - 1;
+      if (stop >= from && stop <= lastStop && stop > prev) stops.push(stop);
+    };
+    if (times.length >= 0.8 * total) {
+      for (let i = this.PIECE; i <= times.length - 1; i += this.PIECE) add(times[i - 1]);
+    } else {
+      const k = Math.ceil(total / this.PIECE);
+      for (let i = 1; i < k; i++) add(from + Math.floor(i * (hi - from + 1) / k) - 1);
+    }
+    if (stops.length === 0) {
+      if (hi <= from && !open) return null;
+      if (hi < from) return null;
+      stops.push(from + Math.floor((hi - from) / 2));
+    }
+    return stops;
   },
 
   // A thousand results created within one second: nothing left to cut on.
@@ -904,6 +911,60 @@ const SearchCore = {
       this.takeItems(ctx, items, new Set(), []);
       if (items.length < this.PER_PAGE) break;
     }
+  },
+
+  // Everything created in [from, to] (`open`: from on). { over, count } at depth 0 when it
+  // holds 1000 or more (page 1 kept); else { over: false, count, times }. Pages move under
+  // a deletion or a star, and equal-star results have no order to keep between requests,
+  // so a window that does not add up is fetched again in pieces of about one page, which
+  // cannot shift under themselves. A one-page piece flagged incomplete is asked once more;
+  // one that still does not add up is taken with a warning, never failing the search.
+  async fetchRange(ctx, query, from, to, open, depth) {
+    const windowed = this.windowQuery(query, from, open ? null : to);
+    const seen = new Set();
+    const times = [];
+    let r = await this.pageOnce(ctx, windowed, seen, times);
+    if (r.over && depth === 0) return { over: true, count: r.total };
+    if (!r.over && !r.short) return { over: false, count: r.total, times };
+    if (!r.over && r.total <= this.PER_PAGE) {
+      let got = r.got;
+      if (r.incomplete) {
+        const r2 = await this.pageOnce(ctx, windowed, seen, times);
+        if (!r2.over) { got += r2.got; r = r2; }
+      }
+      if (got < r.total || r.incomplete) {
+        ctx.warn(`Search count does not add up (${got} of ${r.total}${r.incomplete ? ', incomplete_results' : ''}), taking what GitHub gives: ${windowed}`);
+      }
+      return { over: false, count: r.total, times };
+    }
+    const stops = depth < this.MAX_DEPTH ? this.pieceStops(times, from, to, open, r.total) : null;
+    if (!stops) {
+      if (r.over && !open) await this.takeOneSecond(ctx, query, from);
+      ctx.warn(`Search window cannot be cut further, taking what GitHub gives: ${windowed}`);
+      return { over: false, count: r.total, times };
+    }
+    ctx.warn(`Search window came back short, fetching it in ${stops.length + 1} pieces: ${windowed}`);
+    let count = 0;
+    const all = [];
+    let lo = from;
+    for (let i = 0; i <= stops.length; i++) {
+      const last = i === stops.length;
+      const hi = last ? to : stops[i];
+      const piece = await this.fetchRange(ctx, query, lo, Math.max(hi, lo), last && open, depth + 1);
+      count += piece.count;
+      all.push(...piece.times);
+      lo = hi + 1;
+    }
+    return { over: false, count, times: all };
+  },
+
+  // Results per second just before `to`, from the newer half of a window taken whole.
+  densityBefore(times, from, to) {
+    const n = times.length;
+    if (n < 20) return n / Math.max(1, to - from + 1);
+    times.sort((a, b) => a - b);
+    const mid = Math.floor(n / 2);
+    return (n - mid) / Math.max(1, to - times[mid - 1] + 1);
   },
 
   // Density changing linearly from `start` (nil: even) across a stretch holding `count`.
@@ -939,7 +1000,9 @@ const SearchCore = {
 
   // `to` is the present as far as it is known: the last marker stands for everything from
   // the cursor on, and a window ending at it is left open. Still over the ceiling past it
-  // once the cursor gets there (a clock far behind), the present is pushed out, doubling.
+  // once the cursor gets there, the present is pushed out, doubling, but only as far as
+  // there is evidence of (GitHub's time, the newest repository seen, a look at the open
+  // window's page 1); with nothing more to go on, the search fails as incomplete.
   async sweep(ctx, query, from, to, total) {
     let markers = [{ stop: to, count: total }];
     let density = null;
@@ -952,23 +1015,28 @@ const SearchCore = {
       const baseStop = base ? base.stop : from - 1;
       const baseCount = base ? base.count : 0;
 
-      let cut, result;
       if (outer && outer.stop === to && outer.stop - baseStop <= 1) {
         // Over the ceiling past the present: the present was not the present.
-        to += Math.max(86400, to - start);
+        let limit = Math.max(ctx.serverTime || 0, ctx.newest || 0) + 86400;
+        if (to >= limit) {
+          await this.pageOnce(ctx, this.windowQuery(query, from, null), new Set(), []);
+          limit = Math.max(ctx.serverTime || 0, ctx.newest || 0) + 86400;
+          if (to >= limit) {
+            throw new Error(`GitHub's counts do not match its results past ${this.isoTime(from)} for ${query}`);
+          }
+        }
+        to = Math.min(to + Math.max(86400, to - start), limit);
         outer.stop = to;
         continue;
       }
+
+      let cut, result;
       if (!outer || baseCount >= this.AIM || outer.stop - baseStop <= 1) {
         if (base) {
+          // A count of 0 is not taken on trust: it is worked out by subtraction, and older
+          // repositories can start matching while the sweep runs.
           cut = baseStop;
-          if (cut === to) {
-            // The newest window: open, for whatever was created since.
-            result = await this.fetchWindow(ctx, query, from, null);
-          } else {
-            // Counted empty: nothing created in the past turns up there since.
-            result = baseCount > 0 ? await this.fetchWindow(ctx, query, from, cut) : { over: false, count: 0 };
-          }
+          result = await this.fetchRange(ctx, query, from, cut, cut === to, 0);
         } else {
           cut = outer.stop;
           await this.takeOneSecond(ctx, query, cut);
@@ -976,7 +1044,7 @@ const SearchCore = {
         }
       } else {
         cut = this.chooseCut(from, base, outer, density);
-        result = await this.fetchWindow(ctx, query, from, cut);
+        result = await this.fetchRange(ctx, query, from, cut, false, 0);
       }
 
       if (result.over) {
@@ -999,11 +1067,12 @@ const SearchCore = {
   // (seconds; the present when responses carry no `server_time`, only a guide to where
   // windows are cut, never an end to what is searched), warn(msg).
   async collect(query, opts) {
-    const ctx = { fetch: opts.fetch, append: opts.append, warn: opts.warn || (() => {}), serverTime: null };
+    const ctx = { fetch: opts.fetch, append: opts.append, warn: opts.warn || (() => {}), serverTime: null, newest: 0 };
     if (opts.minStars > 0) query = `${query} stars:>=${opts.minStars}`;
-    const first = await this.fetchWindow(ctx, query, this.ORIGIN_TS, null);
+    let now = opts.now || Math.floor(Date.now() / 1000);
+    const first = await this.fetchRange(ctx, query, this.ORIGIN_TS, Math.max(now, this.ORIGIN_TS + 1), true, 0);
     if (!first.over) return;
-    const now = ctx.serverTime || opts.now || Math.floor(Date.now() / 1000);
+    now = ctx.serverTime || now;
     await this.sweep(ctx, query, this.ORIGIN_TS, Math.max(now, this.ORIGIN_TS + 1), first.count);
   },
 };
@@ -1038,7 +1107,8 @@ const GitHub = {
       return Math.max(1, Math.ceil(retryAfter));
     }
     const reset = Number(res.headers.get('X-RateLimit-Reset'));
-    if (res.headers.get('X-RateLimit-Remaining') === '0' && reset > 0) {
+    if (res.headers.get('X-RateLimit-Remaining') === '0') {
+      if (!(reset > 0)) return window;
       const delay = reset - Math.floor(Date.now() / 1000) + 1;
       if (delay < 1) return window + 1;
       return res.headers.get('X-RateLimit-Resource') === 'search' ? Math.min(delay, window + 1) : delay;

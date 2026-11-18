@@ -210,7 +210,7 @@ function GitHubClient.searchRepositories(opts)
         -- wording rather than an actual rate-limit response. Classic tokens work.
         local is_fine_grained_unsupported = code == 403
             and body
-            and body:lower():find("fine%-grained", 1, true) ~= nil
+            and body:lower():find("fine-grained", 1, true) ~= nil
         -- A 403 is a rate limit only when GitHub says so: no requests left, a Retry-After,
         -- or the wording of the secondary limits. Any other 403 is refused for good, and
         -- waiting would not change that.

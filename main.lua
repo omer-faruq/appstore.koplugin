@@ -9811,6 +9811,11 @@ local function performSearchPage(query, page, per_page)
             or rate_limit_waits >= AppStore.RATE_LIMIT_MAX_WAITS then
             break
         end
+        -- Back pressed during the pump above: the title already says so, and a countdown
+        -- would put "Continuing in N s" over it.
+        if AppStore._refresh_cancelled then
+            return nil, { code = "cancelled", cancelled = true }
+        end
         rate_limit_waits = rate_limit_waits + 1
         logger.info("AppStore: search rate limit reached, waiting", delay, "s")
         local title = progress and progress.title
@@ -9826,6 +9831,11 @@ local function performSearchPage(query, page, per_page)
         if progress then
             progress:setTitle(title)
         end
+    end
+    -- GitHub's time when the search began, for the refresh's stamp: the next incremental run
+    -- asks for repositories pushed since, and on GitHub's clock, not the device's.
+    if response and not AppStore._refresh_server_time then
+        AppStore._refresh_server_time = tonumber(response.server_time)
     end
     -- Stopped while GitHub.request waited to retry a server error: it gave up rather than
     -- retry, and what it hands back is that, not a failure of the search.
@@ -9860,6 +9870,11 @@ local function searchAllBranches(base_query, append)
         { suffix = " fork:only", min_stars = include_zero and 0 or 1 },
     }
     for _, branch in ipairs(branches) do
+        -- One search has failed already, and the refresh will be thrown away: the rest
+        -- would only cost more requests (a full timeout each, with the network down).
+        if AppStore._refresh_search_incomplete or AppStore._refresh_cancelled then
+            return
+        end
         local query = base_query .. branch.suffix
         local err = AppStoreSearch.collect(query, {
             fetch = performSearchPage,
@@ -10025,6 +10040,12 @@ function AppStore:isFullRefreshDue(kind)
     if not last_full then
         return true
     end
+    -- Stamps are on GitHub's clock. One more than a day ahead of the device's says the
+    -- device clock is behind, and how long ago the last full run was is anyone's guess:
+    -- a full run, which needs no clock to be right.
+    if last_full > os.time() + 86400 then
+        return true
+    end
     return (os.time() - last_full) >= self:getFullRefreshIntervalDays() * 86400
 end
 
@@ -10094,6 +10115,7 @@ function AppStore:refreshCache(kind, opts)
 
     self.is_refreshing = true
     AppStore._refresh_search_incomplete = false
+    AppStore._refresh_server_time = nil
     AppStore._refresh_wrote_anything = false
     self.patch_cache = {}
     self._repo_descriptors_cache = nil
@@ -10185,7 +10207,9 @@ function AppStore:refreshCache(kind, opts)
     -- this decides between full and incremental mode.
     local healthy = ok and not cancelled and not AppStore._refresh_search_incomplete and not write_failed
     if healthy then
-        self:markRefreshOk(kind, is_full)
+        -- GitHub's time when the search began (the device's only when no search response
+        -- carried one): the next incremental run's `pushed:>=` is measured against it.
+        self:markRefreshOk(kind, is_full, AppStore._refresh_server_time)
     end
 
     if cancelled then

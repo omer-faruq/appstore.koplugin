@@ -246,12 +246,16 @@ configured interval, not permanent.
 
 - GitHub's search returns at most 1000 results per query. When a query matches more,
   the refresh splits it by creation date on its own, down to the second if it has to,
-  so nothing is left out however many repositories match. It costs about one request
-  per hundred repositories. The newest slice is left open-ended, so a device clock
-  that is wrong (even years behind) does not hide recent repositories.
-- Results that shift while they are paged (a repository deleted or starred meanwhile),
-  or that GitHub marks as incomplete, are fetched again. If GitHub keeps marking them
-  incomplete, the refresh is reported as incomplete and the cache is left as it was.
+  however many repositories match. It costs about one request per hundred
+  repositories. The newest slice is left open-ended and "now" is taken from GitHub,
+  so a device clock that is wrong (even years behind) does not hide recent
+  repositories; incremental refreshes are dated on GitHub's clock too.
+- A slice whose results do not add up to GitHub's count (a repository deleted or
+  starred while it was being paged, or results GitHub marks as incomplete) is fetched
+  again in one-page pieces, which cannot shift. Whatever GitHub still does not hand
+  out after that is logged and left out rather than failing the refresh; so are
+  results beyond the first 1000 created in one and the same second.
+- A refresh whose search fails stops there and leaves the cache as it was.
 - The search rate limit is counted per minute (10 requests without a token, 30 with).
   A refresh that runs into it waits for the window to reopen — the dialog shows
   "GitHub rate limit reached. Continuing in N s…", counting down — and carries on;

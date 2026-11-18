@@ -38,9 +38,10 @@ function check(label, got, expected) {
 function newFakeGitHub(repos) {
   for (const r of repos) r.created_at = r.created_at || SearchCore.isoTime(r.created_ts);
   repos.sort((a, b) => (b.stargazers_count - a.stargazers_count) || (a.tie - b.tie));
-  const gh = { calls: 0, rejected: 0 };
+  const gh = { calls: 0, rejected: 0, queries: [] };
   gh.fetch = async (query, page, perPage) => {
     gh.calls++;
+    gh.queries.push(query);
     let sLo = 0;
     for (const m of query.matchAll(/stars:>=(\d+)/g)) sLo = Math.max(sLo, Number(m[1]));
     let cLo = -Infinity, cHi = Infinity;
@@ -250,8 +251,52 @@ function byStars(a, b) { return (b.stargazers_count - a.stargazers_count) || (a.
   check('incomplete_results once: all collected', r.unique, 2500);
 }
 {
-  const r = await run(makeRepos(300, 0.3, 42), { tamper: response => { response.incomplete_results = true; } });
-  check('incomplete_results every time: an error, not a quiet partial result', r.err !== null, true);
+  // Flagged every time though nothing is missing: taken with a warning, not a failure.
+  const r = await run(makeRepos(2500, 0.3, 42), { tamper: response => { response.incomplete_results = true; } });
+  check('incomplete_results every time: no error', r.err, null);
+  check('incomplete_results every time: all collected', r.unique, 2500);
+  check('incomplete_results every time: warned', r.warnings > 0, true);
+  check(`incomplete_results every time: bounded cost (${r.gh.calls})`, r.gh.calls <= 120, true);
+}
+
+// ── Ties in a different order on every request ────────────────────────────
+for (const zeroShare of [0.6, 0.95]) {
+  const repos = makeRepos(3000, zeroShare, 43);
+  const pick = rng(44);
+  const r = await run(repos, {
+    after: list => {
+      for (const repo of list) repo.tie = pick(2147483647);
+      list.sort(byStars);
+    },
+  });
+  const label = `unstable tie order (${zeroShare * 100}% at 0 stars)`;
+  check(`${label}: no error`, r.err, null);
+  check(`${label}: all collected`, r.unique, 3000);
+}
+
+// ── A count GitHub never makes good ────────────────────────────────────────
+{
+  const plain = await run(makeRepos(3000, 0.3, 45));
+  const r = await run(makeRepos(3000, 0.3, 45), { tamper: response => { response.total_count += 1; } });
+  check('count one too high: no error', r.err, null);
+  check('count one too high: all collected', r.unique, 3000);
+  check(`count one too high: at most 2.5x the requests (${r.gh.calls} vs ${plain.gh.calls})`, r.gh.calls <= plain.gh.calls * 2.5, true);
+}
+
+// ── The newest window counted far over what the windows hold ───────────────
+{
+  const r = await run(makeRepos(3000, 0.3, 46), {
+    tamper: (response, query) => {
+      if (query.includes('created:>=') && response.total_count > 0) response.total_count += 1000;
+    },
+  });
+  check(`inflated open window: stops (${r.gh.calls} requests)`, r.gh.calls <= 80, true);
+  check('inflated open window: reported incomplete', !!(r.err && /do not match/.test(r.err.message)), true);
+  const bad = r.gh.queries.filter(q => {
+    const m = q.match(/created:>?=?(\d{4})/);
+    return /NaN|Invalid|null|undefined/.test(q) || (m && Number(m[1]) > 2027);
+  }).length;
+  check('inflated open window: no window in the far future', bad, 0);
 }
 
 // ── Request cost (same limits as the plugin's test where the data is the same) ──
@@ -364,6 +409,12 @@ function loadGitHub(responses) {
   const body = await t.GitHub.request('/search/repositories');
   check('secondary limit: waited out', body.ok, 1);
   check('secondary limit: a minute', t.waits[0], 60);
+}
+{
+  // Out of requests with no reset given: a minute, as the plugin does.
+  const t = loadGitHub([{ status: 403, headers: { 'X-RateLimit-Remaining': '0' } }, { status: 200, body: { ok: 1 } }]);
+  await t.GitHub.request('/search/repositories');
+  check('403 out of requests, no reset: a minute', t.waits[0], 60);
 }
 {
   const t = loadGitHub([{ status: 403, headers: { 'X-RateLimit-Remaining': '27' }, body: { message: 'Resource not accessible' } }]);
