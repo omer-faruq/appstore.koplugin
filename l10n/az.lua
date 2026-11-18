@@ -397,4 +397,5 @@ return {
     ["Direct (GitHub)"] = "Birbaşa (GitHub)",
     ["Custom"] = "Fərdi",
     ["Discover and manage community plugins and patches from GitHub topics."] = "GitHub mövzularından icma plaginlərini və düzəlişlərini kəşf edin və idarə edin.",
+    ["Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."] = "Wi-Fi qoşulub, amma internetə çıxmaq mümkün deyil. Wi-Fi-ı söndürüb yenidən yandırın və ya KOReader-i yenidən başladın.",
 }

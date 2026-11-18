@@ -397,4 +397,5 @@ return {
     ["Use '%s'"] = "'%s' kullan",
     ["Keep '%s'"] = "'%s' kalsın",
     ["Cancel install"] = "Kurulumu iptal et",
+    ["Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."] = "Wi-Fi bağlı ama internete erişilemiyor. Wi-Fi'yi kapatıp yeniden açın ya da KOReader'ı yeniden başlatın.",
 }

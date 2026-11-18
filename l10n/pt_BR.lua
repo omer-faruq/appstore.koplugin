@@ -397,4 +397,5 @@ return {
     ["Directory '%s' already contains plugin '%s'; refusing to overwrite it with '%s'."] = "O diretório '%s' já contém o plugin '%s'; ele não será sobrescrito por '%s'.",
     ["Directory '%s' already contains plugin '%s'; refusing to overwrite it because the archive did not identify its plugin name."] = "O diretório '%s' já contém o plugin '%s'; ele não será sobrescrito porque o arquivo não informou o nome do plugin.",
     ["Directory '%s' already contains a plugin whose metadata could not be read (the file is corrupt or references modules that are not loadable). Remove the directory manually to allow reinstalling, or choose a different destination."] = "O diretório '%s' contém um plugin cujos metadados não puderam ser lidos (o arquivo está corrompido ou faz referência a módulos que não podem ser carregados). Remova o diretório manualmente para permitir a reinstalação, ou escolha outro destino.",
+    ["Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."] = "O Wi-Fi está conectado, mas não é possível acessar a internet. Desligue e ligue o Wi-Fi novamente ou reinicie o KOReader.",
 }

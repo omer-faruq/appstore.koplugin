@@ -397,4 +397,5 @@ return {
     ["Directory '%s' already contains plugin '%s'; refusing to overwrite it with '%s'."] = "目录「%s」中已存在插件「%s」，已拒绝用「%s」覆盖。",
     ["Directory '%s' already contains plugin '%s'; refusing to overwrite it because the archive did not identify its plugin name."] = "目录「%s」中已存在插件「%s」，因压缩包未标明其插件名称，已拒绝覆盖。",
     ["Directory '%s' already contains a plugin whose metadata could not be read (the file is corrupt or references modules that are not loadable). Remove the directory manually to allow reinstalling, or choose a different destination."] = "目录「%s」中的插件元数据无法读取（文件已损坏，或引用了无法加载的模块）。请手动删除该目录以便重新安装，或另选安装位置。",
+    ["Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."] = "Wi-Fi 已连接，但无法访问互联网。请关闭再打开 Wi-Fi，或重启 KOReader。",
 }

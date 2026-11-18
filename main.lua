@@ -152,6 +152,21 @@ local function showRestartConfirmation(message)
     end)
 end
 
+-- Every network action goes through here, not NetworkMgr:runWhenOnline: on Wi-Fi that is
+-- connected without internet, that one drops the action silently (see appstore_online).
+-- `on_unreachable` undoes what the caller put on screen for an action that will not run.
+function AppStore.runWhenOnline(callback, on_unreachable)
+    require("appstore_online").run(NetworkMgr, callback, function()
+        if on_unreachable then
+            on_unreachable()
+        end
+        UIManager:show(InfoMessage:new{
+            text = _("Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."),
+            timeout = 8,
+        })
+    end)
+end
+
 local function getIgnoredReleases()
     return AppStoreSettings:readSetting(IGNORED_RELEASES_KEY) or {}
 end
@@ -369,7 +384,7 @@ function AppStore:refreshPatchUpdates()
         text = _("Checking patch updates…"),
         timeout = 5,
     })
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         self:_refreshPatchUpdatesInternal(tracked)
     end)
 end
@@ -2352,7 +2367,7 @@ function AppStore:checkAllUpdates()
         UIManager:show(InfoMessage:new{ text = _("No matched plugins to check."), timeout = 4 })
         return
     end
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local Trapper = require("ui/trapper")
         local GitHub = require("appstore_net_github")
 
@@ -2885,7 +2900,7 @@ function AppStore:verifyAndMatchPluginWithManualRepo(plugin, owner, repo_name)
     UIManager:show(progress)
     UIManager:forceRePaint()
     
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local full_name = owner .. "/" .. repo_name
         local repo_data, err = GitHub.fetchRepoMetadata(owner, repo_name)
         UIManager:close(progress)
@@ -2910,6 +2925,8 @@ function AppStore:verifyAndMatchPluginWithManualRepo(plugin, owner, repo_name)
         }
         
         self:matchPluginWithRepo(plugin, repo)
+    end, function()
+        UIManager:close(progress)
     end)
 end
 
@@ -3762,7 +3779,7 @@ function AppStore:checkSinglePlugin(record)
     if not record then
         return
     end
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         self:_checkSinglePluginInternal(record)
     end)
 end
@@ -3778,7 +3795,7 @@ function AppStore:checkSinglePatch(record)
     copy.repo = record.repo
     copy.path = record.path
     copy.branch = record.branch
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         self:_refreshPatchUpdatesInternal({ copy })
     end)
     UIManager:show(InfoMessage:new{ text = string.format(_("Checking %s…"), patch_name), timeout = 3 })
@@ -4028,7 +4045,7 @@ function AppStore:verifyAndMatchPatchWithManualRepo(patch, owner, repo_name)
     UIManager:show(progress)
     UIManager:forceRePaint()
     
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local full_name = owner .. "/" .. repo_name
         local repo_data, err = GitHub.fetchRepoMetadata(owner, repo_name)
         
@@ -4065,6 +4082,8 @@ function AppStore:verifyAndMatchPatchWithManualRepo(patch, owner, repo_name)
         
         self.match_context = { kind = "patch", patch = patch, from_patch_updates = self.patch_updates_menu ~= nil }
         self:showPatchSelectionDialog(patch, repo, entries)
+    end, function()
+        UIManager:close(progress)
     end)
 end
 
@@ -4692,7 +4711,7 @@ function AppStore:promptPatchAction(repo, patch)
 end
 
 function AppStore:installPatchFromRepo(repo, patch)
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         self:_installPatchFromRepoInternal(repo, patch)
     end)
 end
@@ -5457,7 +5476,7 @@ end
 -- Fetch commits between two tags via the GitHub compare API and show them
 -- in a scrollable dialog.  Called from inside the Full changelog dialog.
 function AppStore:showCommitCompare(owner, repo_desc, base_tag, head_tag)
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local progress = InfoMessage:new{ text = _("Fetching commits…"), timeout = 0 }
         UIManager:show(progress)
         UIManager:forceRePaint()
@@ -5519,7 +5538,7 @@ end
 -- when present it is used as the range boundary directly (no version parsing).
 -- Only shown when the target release is strictly newer than what is installed.
 function AppStore:showFullChangelog(owner, repo_desc, installed_version, target_release, installed_tag)
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local progress = InfoMessage:new{ text = _("Fetching changelog…"), timeout = 0 }
         UIManager:show(progress)
         UIManager:forceRePaint()
@@ -5789,7 +5808,7 @@ function AppStore:promptPluginInstallOptions(repo, release_override)
         return
     end
 
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local release, release_err
         if release_override then
             release = release_override
@@ -6009,7 +6028,7 @@ function AppStore:showReleaseListDialog(repo, current_release)
         return
     end
 
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local progress = InfoMessage:new{ text = _("Fetching releases…"), timeout = 0 }
         UIManager:show(progress)
         UIManager:forceRePaint()
@@ -6260,7 +6279,7 @@ function AppStore:installPluginFromReleaseAsset(repo, release, asset)
         return
     end
 
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local cache_dir = ensureCacheDir()
         local downloads_dir = cache_dir .. "/downloads"
         if lfs.attributes(downloads_dir, "mode") ~= "directory" then
@@ -7860,10 +7879,12 @@ end
 function AppStore:browserRefresh(opts)
     self:ensureBrowserState()
     local kind = self.browser_state.kind or "plugin"
-    self:resetBrowserScrollState()
-    self:resetFiltersForRefresh()
-    self:closeBrowserMenu()
-    NetworkMgr:runWhenOnline(function()
+    -- The browser is closed only once the refresh is going to run: closed up front, it
+    -- stayed closed whenever the network check gave up.
+    AppStore.runWhenOnline(function()
+        self:resetBrowserScrollState()
+        self:resetFiltersForRefresh()
+        self:closeBrowserMenu()
         UIManager:nextTick(function()
             -- No "caching started" notice: refreshCache puts up a progress dialog straight
             -- away, and the two of them on screen at once only looked like a glitch.
@@ -7923,7 +7944,7 @@ function AppStore:showBrowser(kind)
         local search_text = self.browser_state.search_text or ""
         if self.browser_state.search_in_readme and search_text ~= "" then
             self.readme_filter = nil
-            NetworkMgr:runWhenOnline(function()
+            AppStore.runWhenOnline(function()
                 if not self.browser_state or not self.browser_state.search_in_readme then
                     return
                 end
@@ -8145,7 +8166,7 @@ function AppStore:showFilterDialog()
                         local search_text = self.browser_state.search_text or ""
                         local kind = self.browser_state.kind or "plugin"
                         if enable_readme and search_text ~= "" then
-                            NetworkMgr:runWhenOnline(function()
+                            AppStore.runWhenOnline(function()
                                 if not self.browser_state or not self.browser_state.search_in_readme then
                                     return
                                 end
@@ -8625,7 +8646,7 @@ function AppStore:fetchAndShowPluginRepo(owner, repo_name)
     UIManager:show(progress)
     UIManager:forceRePaint()
     
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local full_name = owner .. "/" .. repo_name
         local repo_data, err = GitHub.fetchRepoMetadata(owner, repo_name)
         UIManager:close(progress)
@@ -8650,6 +8671,8 @@ function AppStore:fetchAndShowPluginRepo(owner, repo_name)
         }
         
         self:promptRepoAction(repo)
+    end, function()
+        UIManager:close(progress)
     end)
 end
 
@@ -8715,7 +8738,7 @@ function AppStore:fetchAndShowPatchRepo(owner, repo_name)
     UIManager:show(progress)
     UIManager:forceRePaint()
     
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         local full_name = owner .. "/" .. repo_name
         local repo_data, err = GitHub.fetchRepoMetadata(owner, repo_name)
         
@@ -8751,6 +8774,8 @@ function AppStore:fetchAndShowPatchRepo(owner, repo_name)
         end
         
         self:showPatchRepoActionDialog(repo, entries)
+    end, function()
+        UIManager:close(progress)
     end)
 end
 
@@ -9506,7 +9531,7 @@ function AppStore:installPluginFromRepo(repo)
         return
     end
 
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         self:_installPluginFromRepoInternal(repo)
     end)
 end
@@ -9702,7 +9727,7 @@ function AppStore:showReadme(repo)
         UIManager:show(InfoMessage:new{ text = _("Missing repository metadata for README download."), timeout = 4 })
         return
     end
-    NetworkMgr:runWhenOnline(function()
+    AppStore.runWhenOnline(function()
         if RepoContent.supportsReadmePopup() then
             local content, err = RepoContent.fetchReadmeContent(owner, repo.name)
             if not content then

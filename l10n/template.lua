@@ -1,4 +1,4 @@
--- 395 unique strings
+-- 396 unique strings
 return {
     ["This will take effect on next restart."] = "This will take effect on next restart.",
     ["Restart now"] = "Restart now",
@@ -425,4 +425,5 @@ Changes will take effect after restart.",
     ["Direct (GitHub)"] = "Direct (GitHub)",
     ["Custom"] = "Custom",
     ["Discover and manage community plugins and patches from GitHub topics."] = "Discover and manage community plugins and patches from GitHub topics.",
+    ["Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."] = "Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader.",
 }

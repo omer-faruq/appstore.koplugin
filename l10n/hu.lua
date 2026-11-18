@@ -465,4 +465,5 @@ A változtatások az újraindítás után lépnek érvénybe.",
     "A(z) „%s” könyvtár már tartalmazza a(z) „%s” bővítményt; nem írjuk felül, mert az archívum nem adta meg a bővítmény nevét.",
     ["Directory '%s' already contains a plugin whose metadata could not be read (the file is corrupt or references modules that are not loadable). Remove the directory manually to allow reinstalling, or choose a different destination."] =
     "A(z) „%s” könyvtár olyan bővítményt tartalmaz, amelynek metaadatai nem olvashatók (a fájl sérült, vagy nem betölthető modulokra hivatkozik). Az újratelepítéshez törölje a könyvtárat kézzel, vagy válasszon másik célt.",
+    ["Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."] = "A Wi-Fi csatlakozik, de az internet nem érhető el. Kapcsolja ki, majd be a Wi-Fit, vagy indítsa újra a KOReadert.",
 }

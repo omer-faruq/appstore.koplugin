@@ -397,4 +397,5 @@ return {
     ["Direct (GitHub)"] = "Priamo (GitHub)",
     ["Custom"] = "Vlastné",
     ["Discover and manage community plugins and patches from GitHub topics."] = "Objavujte a spravujte komunitné pluginy a záplaty z tém GitHub.",
+    ["Wi-Fi is connected, but the internet cannot be reached. Turn Wi-Fi off and on again, or restart KOReader."] = "Wi-Fi je pripojené, ale internet nie je dostupný. Vypnite a znova zapnite Wi-Fi alebo reštartujte KOReader.",
 }
