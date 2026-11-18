@@ -102,6 +102,11 @@ end
 
 function GitHubClient.searchRepositories(opts)
     opts = opts or {}
+    -- GitHub search only returns the first 1000 results; requesting past
+    -- that returns 422, so return an empty page and let callers stop.
+    if ((opts.page or 1) - 1) * (opts.per_page or 30) >= 1000 then
+        return { items = {}, total_count = 0 }, nil
+    end
     local query = buildQuery(opts)
     local code, body = request("/search/repositories", query)
     if code ~= 200 then
