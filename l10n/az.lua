@@ -358,6 +358,7 @@ return {
     ["README: %s/%s"] = "README: %s/%s",
     ["GitHub API rate limit exceeded. Please wait a few minutes and try again."] = "GitHub API-sinin sorğu tezliyi həddi aşıldı. Bir neçə dəqiqə gözləyin və yenidən cəhd edin.",
     ["GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min)."] = "GitHub API-sinin sorğu tezliyi həddi aşıldı. Həddi artırmaq üçün AppStore parametrlərinə GitHub giriş açarı əlavə edin (10→30 sorğu/dəq).",
+    ["GitHub rate limit reached. Continuing in %d s…"] = "GitHub sorğu limitinə çatıldı. %d san. sonra davam ediləcək…",
     ["GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."] = "GitHub bu sorğunu rədd etdi: axtarış üçün təfərrüatlı icazələri olan şəxsi giriş açarları dəstəklənmir. Əvəzinə klassik açardan istifadə edin (AppStore README faylına baxın).",
     ["Saving to the cache…"] = "Keşdə yadda saxlanılır…",
     ["Refreshing patches…"] = "Düzəlişlər yenilənir…",

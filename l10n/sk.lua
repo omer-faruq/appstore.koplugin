@@ -365,6 +365,7 @@ return {
     ["README: %s/%s"] = "README: %s/%s",
     ["GitHub API rate limit exceeded. Please wait a few minutes and try again."] = "Prekročený limit požiadaviek GitHub API. Počkajte niekoľko minút a skúste to znova.",
     ["GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min)."] = "Prekročený limit požiadaviek GitHub API. Pridajte token pre GitHub v nastaveniach AppStore na zvýšenie limitu (10→30 požiadaviek/min).",
+    ["GitHub rate limit reached. Continuing in %d s…"] = "Dosiahnutý limit požiadaviek GitHubu. Pokračovanie o %d s…",
     ["GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."] = "GitHub túto požiadavku odmietol: jemne odstupňované osobné prístupové tokeny nie sú pre vyhľadávanie podporované. Použite namiesto toho klasický token (pozri README AppStore).",
     ["Saving to the cache…"] = "Ukladá sa do vyrovnávacej pamäte…",
     ["Refreshing patches…"] = "Obnovujú sa záplaty…",

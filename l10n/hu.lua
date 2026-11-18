@@ -395,6 +395,7 @@ A változtatások az újraindítás után lépnek érvénybe.",
     "A GitHub API sebességkorlátja túllépve. Várjon néhány percet, majd próbálja újra.",
     ["GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min)."] =
     "A GitHub API sebességkorlátja túllépve. A korlát növeléséhez adjon meg egy GitHub-tokent az AppStore beállításaiban (10→30 kérés/perc).",
+    ["GitHub rate limit reached. Continuing in %d s…"] = "Elérte a GitHub kéréskorlátját. Folytatás %d mp múlva…",
     ["GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."] =
     "A GitHub elutasította ezt a kérést: a keresés nem támogatja a finomhangolt személyes hozzáférési tokeneket. Használjon helyettük klasszikus tokent (lásd az AppStore README-jét).",
     ["Saving to the cache…"] = "Mentés a gyorsítótárba…",

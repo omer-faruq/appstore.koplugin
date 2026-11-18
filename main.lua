@@ -9743,6 +9743,31 @@ function AppStore.searchWasCancelled(err)
     return type(err) == "table" and err.cancelled == true
 end
 
+-- The longest search rate-limit wait sat through, and how many of them for one page. The
+-- search window is a minute; anything longer is not the search limit.
+AppStore.RATE_LIMIT_MAX_WAIT = 75
+AppStore.RATE_LIMIT_MAX_WAITS = 5
+
+-- Wait `seconds` in the middle of a refresh, reading input all the while so Back still
+-- stops it. Returns false when the refresh was stopped meanwhile. Outside a coroutine
+-- (nothing to yield to) it can only sleep.
+function AppStore.refreshWait(seconds)
+    local progress = AppStore._refresh_progress
+    if not (progress and coroutine.running()) then
+        require("ffi/util").sleep(seconds)
+        return not AppStore._refresh_cancelled
+    end
+    local time = require("ui/time")
+    local deadline = time.now() + time.s(seconds)
+    while time.now() < deadline do
+        if AppStore._refresh_cancelled then
+            return false
+        end
+        progress:pump()
+    end
+    return not AppStore._refresh_cancelled
+end
+
 local function performSearchPage(query, page, per_page)
     -- Checked here rather than in the loops: every branch, bisection and page goes through
     -- this call, so one test unwinds all of them at once. Without it, stopping mid-search
@@ -9750,20 +9775,45 @@ local function performSearchPage(query, page, per_page)
     if AppStore._refresh_cancelled then
         return nil, { code = "cancelled", cancelled = true }
     end
-    local response, err = GitHub.searchRepositories({
-        q = query,
-        per_page = per_page,
-        sort = "stars",
-        order = "desc",
-        page = page,
-    })
-    -- After the request, whatever it returned. Progress reporting pumps the input queue,
-    -- but it only runs when a repository is appended: a run of empty pages -- a fork
-    -- branch with no hits, a name query that matches nothing -- would leave Back unread
-    -- for as long as those requests take.
     local progress = AppStore._refresh_progress
-    if progress then
-        progress:pump()
+    local response, err
+    local rate_limit_waits = 0
+    while true do
+        response, err = GitHub.searchRepositories({
+            q = query,
+            per_page = per_page,
+            sort = "stars",
+            order = "desc",
+            page = page,
+        })
+        -- After the request, whatever it returned. Progress reporting pumps the input queue,
+        -- but it only runs when a repository is appended: a run of empty pages -- a fork
+        -- branch with no hits, a name query that matches nothing -- would leave Back unread
+        -- for as long as those requests take.
+        if progress then
+            progress:pump()
+        end
+        -- The search limit is counted per minute (10 requests without a token, 30 with),
+        -- and a large refresh runs into it. Waiting the window out and asking again lets the
+        -- refresh finish, only slower; a reset further off than a minute is the hourly core
+        -- limit, or GitHub did not say, and that still ends the refresh with the message.
+        local delay = not response and GitHub.rateLimitDelay(err, os.time())
+        if not delay or delay > AppStore.RATE_LIMIT_MAX_WAIT
+            or rate_limit_waits >= AppStore.RATE_LIMIT_MAX_WAITS then
+            break
+        end
+        rate_limit_waits = rate_limit_waits + 1
+        logger.info("AppStore: search rate limit reached, waiting", delay, "s")
+        local title = progress and progress.title
+        if progress then
+            progress:setTitle(string.format(_("GitHub rate limit reached. Continuing in %d s…"), delay))
+        end
+        if not AppStore.refreshWait(delay) then
+            return nil, { code = "cancelled", cancelled = true }
+        end
+        if progress then
+            progress:setTitle(title)
+        end
     end
     if not response then
         if type(err) == "table" and err.is_fine_grained_unsupported then
@@ -10055,6 +10105,10 @@ function AppStore:refreshCache(kind, opts)
     -- an incremental one, an empty result is a healthy "nothing changed" and does not set
     -- this at all -- see fetchAndStore's `stored` return value.
     local write_failed = false
+    -- The pauses between retries of a GitHub server error, for as long as the refresh runs,
+    -- keep reading input like the rest of it: a plain sleep would leave Back unread.
+    local plain_wait = GitHub.wait
+    GitHub.wait = AppStore.refreshWait
     -- Opened before the dialog is shown: a throw in between would leave a modal on screen
     -- with no way to dismiss it, and `is_refreshing` set for the rest of the session.
     local ok, err = pcall(function()
@@ -10100,6 +10154,7 @@ function AppStore:refreshCache(kind, opts)
         end
     end)
 
+    GitHub.wait = plain_wait
     UIManager:close(progress)
     AppStore._refresh_progress = nil
     self.is_refreshing = false

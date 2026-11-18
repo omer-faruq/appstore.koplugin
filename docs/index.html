@@ -800,9 +800,190 @@ const ReadmeStore = (() => {
   };
 })();
 
+// ─── Exhaustive search past the 1000-result ceiling ─── search-core:begin
+// A port of the plugin's appstore_search.lua: the same windows, the same requests.
+// tests/site_search_test.mjs runs this block against the plugin's fake GitHub and its
+// live snapshot, to the same request counts. Change the two together.
+//
+// GitHub hands out at most the first 1000 results of any query, and the Search API is
+// rate-limited per request, so requests are what this keeps down (the floor is one per
+// hundred repositories). The whole history is tried as one `created:` window first;
+// past the ceiling it is swept oldest to newest in windows aimed under it. Each
+// over-limit window leaves a marker ahead of the cursor (where it ends, how many lie
+// before that, exactly); a window ends at a counted marker when that fits, else at a
+// point worked out from the counts and the density just behind the cursor. Never from
+// the order results come in: sorted by stars, they lean heavily towards old repos.
+const SearchCore = {
+  RESULT_LIMIT: 1000,
+  PER_PAGE: 100,
+  AIM: 900,
+  ORIGIN_TS: 1191196800, // 2007-10-01, before GitHub existed
+
+  isoTime(ts) { return new Date(ts * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'); },
+  parseIso(s) {
+    const t = typeof s === 'string' ? Date.parse(s) : NaN;
+    return Number.isNaN(t) ? null : Math.floor(t / 1000);
+  },
+  windowQuery(query, from, to) { return `${query} created:${this.isoTime(from)}..${this.isoTime(to)}`; },
+
+  // Page through [from, to]. { over: true, count } when it holds 1000 or more (known from
+  // page 1, whose results are kept all the same); otherwise { over: false, count, times }.
+  async fetchWindow(ctx, query, from, to) {
+    const windowed = this.windowQuery(query, from, to);
+    const times = [];
+    for (let page = 1; ; page++) {
+      const res = await ctx.fetch(windowed, page, this.PER_PAGE);
+      const total = Number(res.total_count) || 0;
+      const items = res.items || [];
+      for (const repo of items) {
+        if (!repo || typeof repo !== 'object') continue;
+        ctx.append(repo);
+        const t = this.parseIso(repo.created_at);
+        if (t !== null) times.push(t);
+      }
+      // Ten full pages of a window counted under the ceiling: it grew while being paged.
+      if ((page === 1 && total >= this.RESULT_LIMIT)
+          || (items.length === this.PER_PAGE && page * this.PER_PAGE >= this.RESULT_LIMIT)) {
+        return { over: true, count: Math.max(total, this.RESULT_LIMIT) };
+      }
+      if (items.length < this.PER_PAGE || page * this.PER_PAGE >= total) {
+        return { over: false, count: total, times };
+      }
+    }
+  },
+
+  // Results per second just before `to`, from the newer half of a window taken whole.
+  densityBefore(times, from, to) {
+    const n = times.length;
+    if (n < 20) return n / Math.max(1, to - from + 1);
+    times.sort((a, b) => a - b);
+    const mid = Math.floor(n / 2);
+    return (n - mid) / Math.max(1, to - times[mid - 1] + 1);
+  },
+
+  // A thousand results created within one second: nothing left to cut on.
+  async takeOneSecond(ctx, query, ts) {
+    ctx.warn(`Search over the result limit within one second, some results skipped: ${query} @ ${this.isoTime(ts)}`);
+    const windowed = this.windowQuery(query, ts, ts);
+    for (let page = 1; page <= this.RESULT_LIMIT / this.PER_PAGE; page++) {
+      const res = await ctx.fetch(windowed, page, this.PER_PAGE);
+      const items = res.items || [];
+      for (const repo of items) ctx.append(repo);
+      if (items.length < this.PER_PAGE) break;
+    }
+  },
+
+  // Density changing linearly from `start` (nil: even) across a stretch holding `count`.
+  linearDensity(count, length, start) {
+    const avg = count / length;
+    let a = start == null ? avg : start;
+    let b = 2 * avg - a;
+    if (b < 0) { a = 2 * avg; b = 0; }
+    return [a, b];
+  },
+  // Seconds into such a stretch at which `need` results have gone by.
+  secondsFor(need, a, b, length) {
+    const k = (b - a) / (2 * length);
+    const disc = a * a + 4 * k * need;
+    if (disc < 0) return length;
+    const denom = a + Math.sqrt(disc);
+    return denom <= 0 ? length : 2 * need / denom;
+  },
+  chooseCut(from, base, outer, density) {
+    const baseStop = base ? base.stop : from - 1;
+    const baseCount = base ? base.count : 0;
+    let start = density;
+    if (base) {
+      const [, b] = this.linearDensity(baseCount, Math.max(1, baseStop - from + 1), density);
+      start = density == null ? null : b;
+    }
+    const length = outer.stop - baseStop;
+    const [a, b] = this.linearDensity(outer.count - baseCount, length, start);
+    const s = this.secondsFor(this.AIM - baseCount, a, b, length);
+    const cut = baseStop + Math.floor(s);
+    return Math.max(baseStop + 1, Math.min(cut, outer.stop - 1));
+  },
+
+  async sweep(ctx, query, from, to, total) {
+    let markers = [{ stop: to, count: total }];
+    let density = null;
+    while (markers.length > 0) {
+      let j = 0;
+      while (j < markers.length && markers[j].count < this.RESULT_LIMIT) j++;
+      const base = j > 0 ? markers[j - 1] : null;
+      const outer = j < markers.length ? markers[j] : null;
+      const baseStop = base ? base.stop : from - 1;
+      const baseCount = base ? base.count : 0;
+
+      let cut, result;
+      if (!outer || baseCount >= this.AIM || outer.stop - baseStop <= 1) {
+        if (base) {
+          cut = baseStop;
+          // Counted empty: nothing created before `now` turns up there since.
+          result = baseCount > 0 ? await this.fetchWindow(ctx, query, from, cut) : { over: false, count: 0 };
+        } else {
+          cut = outer.stop;
+          await this.takeOneSecond(ctx, query, cut);
+          result = { over: false, count: outer.count };
+        }
+      } else {
+        cut = this.chooseCut(from, base, outer, density);
+        result = await this.fetchWindow(ctx, query, from, cut);
+      }
+
+      if (result.over) {
+        if (base && cut === baseStop) {
+          base.count = result.count; // grew past the ceiling meanwhile
+        } else {
+          markers.splice(j, 0, { stop: cut, count: Math.min(Math.max(result.count, baseCount), outer.count) });
+        }
+      } else {
+        if (result.times && result.times.length > 0) density = this.densityBefore(result.times, from, cut);
+        from = cut + 1;
+        markers = markers.filter(m => m.stop > cut);
+        for (const m of markers) m.count = Math.max(0, m.count - result.count);
+      }
+    }
+  },
+
+  // Every repository matching `query`. opts: fetch(query, page, perPage) -> response
+  // (throws on failure), append(repo) (repeats are the caller's to drop), minStars, now
+  // (seconds), warn(msg).
+  async collect(query, opts) {
+    const ctx = { fetch: opts.fetch, append: opts.append, warn: opts.warn || (() => {}) };
+    if (opts.minStars > 0) query = `${query} stars:>=${opts.minStars}`;
+    const now = opts.now || Math.floor(Date.now() / 1000);
+    const first = await this.fetchWindow(ctx, query, this.ORIGIN_TS, now);
+    if (!first.over) return;
+    await this.sweep(ctx, query, this.ORIGIN_TS, now, first.count);
+  },
+};
+// ─── search-core:end
+
 // ─── GitHub API client ───
 const GitHub = {
   BASE: 'https://api.github.com',
+  // Seconds before each retry of a 5xx: GitHub's server errors are nearly always passing
+  // (a search that ran out of time on their side, a deploy) and gone on the next try.
+  SERVER_ERROR_RETRY_DELAYS: [1, 3],
+  // The search limit is counted per minute (10 requests without a token, 30 with), and a
+  // large refresh runs into it. Waiting the window out lets it finish, only slower; a reset
+  // further off than this is not the search limit, and still fails with the message.
+  RATE_LIMIT_MAX_WAIT: 75,
+  RATE_LIMIT_MAX_WAITS: 5,
+  // Set by the app, to tell the user why nothing is happening for a minute.
+  onRateLimitWait: null,
+  sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); },
+  // Seconds until a rate-limited request may be repeated, or null when GitHub did not say.
+  rateLimitDelay(res) {
+    const retryAfter = Number(res.headers.get('Retry-After'));
+    if (retryAfter > 0) return Math.ceil(retryAfter);
+    const reset = Number(res.headers.get('X-RateLimit-Reset'));
+    if (res.headers.get('X-RateLimit-Remaining') === '0' && reset > 0) {
+      return Math.max(1, reset - Math.floor(Date.now() / 1000) + 1);
+    }
+    return null;
+  },
   getHeaders() {
     const h = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'KOReader-AppStore-Web' };
     const token = Storage.get('github_pat');
@@ -811,7 +992,30 @@ const GitHub = {
   },
   async request(path, query) {
     const url = query ? `${this.BASE}${path}?${query}` : `${this.BASE}${path}`;
-    const res = await fetch(url, { headers: this.getHeaders() });
+    let res;
+    let serverRetries = 0;
+    let rateLimitWaits = 0;
+    while (true) {
+      res = await fetch(url, { headers: this.getHeaders() });
+      if (res.ok) break;
+      if (res.status >= 500 && res.status <= 599 && serverRetries < this.SERVER_ERROR_RETRY_DELAYS.length) {
+        const delay = this.SERVER_ERROR_RETRY_DELAYS[serverRetries++];
+        console.warn(`GitHub ${res.status}, retrying in ${delay} s: ${path}`);
+        await this.sleep(delay * 1000);
+        continue;
+      }
+      if (res.status === 403 || res.status === 429) {
+        const delay = this.rateLimitDelay(res);
+        if (delay !== null && delay <= this.RATE_LIMIT_MAX_WAIT && rateLimitWaits < this.RATE_LIMIT_MAX_WAITS) {
+          rateLimitWaits++;
+          console.info(`GitHub rate limit reached, waiting ${delay} s`);
+          if (this.onRateLimitWait) this.onRateLimitWait(delay);
+          await this.sleep(delay * 1000);
+          continue;
+        }
+      }
+      break;
+    }
     if (!res.ok) {
       let detail = res.statusText;
       try {
@@ -839,51 +1043,17 @@ const GitHub = {
     const params = new URLSearchParams({ q, sort, order, page, per_page: perPage });
     return this.request('/search/repositories', params.toString());
   },
-  async paginateQuery(q, sort = 'stars', order = 'desc') {
-    const all = [];
-    let page = 1;
-    let totalCount = 0;
-    while (true) {
-      const data = await this.searchRepos(q, sort, order, page, 100);
-      if (page === 1) totalCount = data.total_count || 0;
-      const items = data.items || [];
-      if (items.length === 0) break;
-      all.push(...items);
-      if (items.length < 100) break;
-      page++;
-    }
-    return { items: all, totalCount };
-  },
-  async exhaustiveSearch(baseQuery, sort = 'stars', order = 'desc', dateFrom = null, dateTo = null, depth = 0) {
-    const LIMIT = 1000;
-    const MAX_DEPTH = 8;
-    const ORIGIN = '2010-01-01';
-    let query = baseQuery;
-    if (dateFrom && dateTo) query = `${baseQuery} created:${dateFrom}..${dateTo}`;
-    // Probe total_count
-    const probe = await this.searchRepos(query, sort, order, 1, 1);
-    const totalCount = probe.total_count || 0;
-    if (totalCount < LIMIT || depth >= MAX_DEPTH) {
-      if (totalCount >= LIMIT) console.warn(`Date bisect depth limit reached, some results may be lost: ${query} (${totalCount})`);
-      const result = await this.paginateQuery(query, sort, order);
-      return result.items;
-    }
-    // Bisect by created date
-    console.info(`Query has ${totalCount} results (>=1000), bisecting by date: ${query}`);
-    const fromTs = dateFrom ? new Date(dateFrom).getTime() : new Date(ORIGIN).getTime();
-    const toTs = dateTo ? new Date(dateTo).getTime() : Date.now();
-    if (toTs - fromTs < 86400000) {
-      const result = await this.paginateQuery(query, sort, order);
-      return result.items;
-    }
-    const midTs = Math.floor((fromTs + toTs) / 2);
-    const midDate = new Date(midTs).toISOString().slice(0, 10);
-    const nextDate = new Date(midTs + 86400000).toISOString().slice(0, 10);
-    const fromStr = dateFrom || ORIGIN;
-    const toStr = dateTo || new Date().toISOString().slice(0, 10);
-    const left = await this.exhaustiveSearch(baseQuery, sort, order, fromStr, midDate, depth + 1);
-    const right = await this.exhaustiveSearch(baseQuery, sort, order, nextDate, toStr, depth + 1);
-    return [...left, ...right];
+  // Every repository matching `q`, however many (see SearchCore). `minStars` keeps lower
+  // counts out of the query itself.
+  async exhaustiveSearch(q, minStars = 0) {
+    const repos = [];
+    await SearchCore.collect(q, {
+      fetch: (query, page, perPage) => this.searchRepos(query, 'stars', 'desc', page, perPage),
+      append: repo => repos.push(repo),
+      minStars,
+      warn: msg => console.warn(msg),
+    });
+    return repos;
   },
   async fetchRepoTree(owner, repo, ref = 'HEAD') {
     const cacheKey = `tree_${owner}/${repo}`;
@@ -1114,6 +1284,12 @@ const app = {
   },
 
   init() {
+    // A refresh waiting out GitHub's per-minute search limit is silent for up to a minute;
+    // say so, rather than leave it looking stuck.
+    GitHub.onRateLimitWait = seconds => this.showToast(
+      `⏳ GitHub rate limit reached — continuing in ${seconds} s.` +
+      ((Storage.get('github_pat') || '').trim() ? '' : ' A token in ⚙️ Settings raises the limit (10→30 req/min).'),
+      Math.min(seconds, 10) * 1000);
     this.applyTheme(Storage.get('theme') || 'dark');
     const savedSort = Storage.get('sort_mode');
     if (savedSort) { this.sortMode = savedSort; document.getElementById('sortSelect').value = savedSort; }
@@ -1183,20 +1359,15 @@ const app = {
     if (pa && pa.repos && pa.withZeroStarForks === this.includeZeroStarForks) this.data.patches = pa.repos;
   },
 
-  expandQueryForForkStarSplit(baseQuery) {
-    // When `includeZeroStarForks` is false we intentionally skip the `fork:only stars:0`
-    // query so that 0-star forks are never downloaded from the API. This is the main
-    // driver of noise in the results, so filtering server-side keeps the client list
-    // focused on meaningful repos.
-    const queries = [
-      `${baseQuery} fork:only stars:>=1`,
-      `${baseQuery} stars:0`,
-      `${baseQuery} stars:>=1`,
+  // GitHub's search leaves forks out unless asked, so every base query runs twice: as is,
+  // and for forks. When `includeZeroStarForks` is false the fork query asks for 1 star
+  // and up, so 0-star forks -- the main source of noise -- are never downloaded at all.
+  // Neither needs splitting by hand: SearchCore gets past the 1000-result ceiling itself.
+  searchBranches(baseQuery) {
+    return [
+      { q: baseQuery, minStars: 0 },
+      { q: `${baseQuery} fork:only`, minStars: this.includeZeroStarForks ? 0 : 1 },
     ];
-    if (this.includeZeroStarForks) {
-      queries.unshift(`${baseQuery} fork:only stars:0`);
-    }
-    return queries;
   },
 
   async fetchCategory(kind) {
@@ -1211,11 +1382,10 @@ const app = {
     let totalQueries = 0;
 
     for (const baseQ of allBaseQueries) {
-      const splitQueries = this.expandQueryForForkStarSplit(baseQ);
-      for (const q of splitQueries) {
+      for (const { q, minStars } of this.searchBranches(baseQ)) {
         totalQueries++;
         try {
-          const repos = await GitHub.exhaustiveSearch(q);
+          const repos = await GitHub.exhaustiveSearch(q, minStars);
           for (const repo of repos) {
             const key = repo.full_name.toLowerCase();
             if (!seen.has(key)) {

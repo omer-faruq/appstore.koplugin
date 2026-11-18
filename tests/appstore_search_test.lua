@@ -5,7 +5,12 @@
 --
 -- appstore_search has no KOReader dependencies: the page fetch is handed in, so
 -- these tests drive it against a fake GitHub search that enforces the real
--- 1000-result ceiling (422 past it) and the stars:/created: qualifiers.
+-- 1000-result ceiling (422 past it) and the stars:/created: qualifiers, and
+-- answers sort=stars the way GitHub does -- which matters, since the
+-- most-starred repositories are the old ones.
+--
+-- The request counts asserted below are the module's measured cost, with a
+-- little slack: a change that makes the search markedly more expensive fails.
 package.path = "plugins/appstore.koplugin/?.lua;./?.lua;" .. package.path
 
 local Search = require("appstore_search")
@@ -48,6 +53,9 @@ end
 -- Repos are kept sorted the way GitHub answers sort=stars&order=desc: by stars,
 -- ties in an order that has nothing to do with creation time.
 local function newFakeGitHub(repos)
+    for _, r in ipairs(repos) do
+        r.created_at = r.created_at or os.date("!%Y-%m-%dT%H:%M:%SZ", r.created_ts)
+    end
     table.sort(repos, function(a, b)
         if a.stargazers_count ~= b.stargazers_count then
             return a.stargazers_count > b.stargazers_count
@@ -94,12 +102,14 @@ local function newFakeGitHub(repos)
     return gh
 end
 
--- Deterministic pseudo-random numbers (LCG), so a failure reproduces.
+-- Deterministic pseudo-random numbers, so a failure reproduces. LuaJIT's own
+-- generator (Tausworthe) is seedable and repeatable; a hand-rolled LCG
+-- correlated consecutive draws -- one repository's stars with its creation
+-- time -- which is a bias GitHub's data does not have.
 local function rng(seed)
-    local state = seed
+    math.randomseed(seed)
     return function(n)
-        state = (state * 1103515245 + 12345) % 2147483648
-        return state % n
+        return math.random(0, n - 1)
     end
 end
 
@@ -107,22 +117,61 @@ local FROM = utc(2008, 4, 1)
 local NOW = utc(2026, 11, 18, 12, 0, 0)
 
 -- `zero_share` of the repos get 0 stars, the rest a long-tailed count.
-local function makeRepos(n, zero_share, seed)
+-- `skew` 1 spreads creation evenly over the years; higher piles it up towards
+-- the present, the way the KOReader ecosystem actually grew.
+-- `old_stars`: older repositories hold more of the stars, as they do on GitHub,
+-- so page 1 (the most-starred) leans towards the older end of a window.
+local function makeRepos(n, zero_share, seed, skew, old_stars)
     local rand = rng(seed or 1)
+    skew = skew or 1
     local repos = {}
     for i = 1, n do
         local stars = 0
         if rand(1000) >= zero_share * 1000 then
             stars = 1 + math.floor(2 ^ (rand(1400) / 100)) -- 1 .. ~16000, most of them small
         end
+        local age = (rand(1000000) / 1000000) ^ skew
+        if old_stars then
+            stars = math.floor(stars * 4 * age)
+        end
         repos[i] = {
             id = i,
             full_name = "owner" .. i .. "/repo.koplugin",
             stargazers_count = stars,
-            created_ts = FROM + rand(NOW - FROM),
+            created_ts = NOW - math.floor((NOW - FROM) * age),
             tie = rand(2147483647),
         }
     end
+    return repos
+end
+
+-- The live snapshot in tests/fixtures: every in:name ".koplugin" repository
+-- with its real creation time and star count, for request counts measured on
+-- the distribution that matters rather than a made-up one.
+local function loadSnapshot(branch)
+    local path
+    for _, candidate in ipairs({
+        "tests/fixtures/koplugin_search_snapshot.txt",
+        "plugins/appstore.koplugin/tests/fixtures/koplugin_search_snapshot.txt",
+    }) do
+        local f = io.open(candidate, "rb")
+        if f then f:close(); path = candidate; break end
+    end
+    assert(path, "snapshot fixture not found")
+    local repos = {}
+    local tie = rng(99)
+    for line in io.lines(path) do
+        local b, created, stars = line:match("^(%a+) (%d+) (%d+)")
+        if b == branch then
+            repos[#repos + 1] = {
+                id = #repos + 1,
+                stargazers_count = tonumber(stars),
+                created_ts = tonumber(created),
+                tie = tie(2147483647),
+            }
+        end
+    end
+    assert(#repos > 1000, "snapshot fixture has too few " .. branch .. " rows")
     return repos
 end
 
@@ -199,11 +248,30 @@ do
     check("100k repos: no error", r.err, nil)
     check("100k repos: all collected", r.unique, 100000)
     check("100k repos: never asked past 1000", r.gh.rejected, 0)
-    -- 1000 pages is the floor; the cursor's overlap and the bisection's
-    -- over-limit probes may cost a little on top, not a multiple.
-    check("100k repos: under 1300 requests (" .. r.gh.calls .. ")", r.gh.calls < 1300, true)
+    -- 1000 pages is the floor; over-limit windows and each window's partly
+    -- filled last page cost a little on top.
+    check("100k repos: under 1080 requests (" .. r.gh.calls .. ")", r.gh.calls < 1080, true)
     print(string.format("      100k run: %d requests, %.1f s", r.gh.calls, os.clock() - clock))
 end
+
+-- ── Request cost: how close to one request per hundred repositories ─────────
+-- Search is rate-limited per request (30/min with a token, 10 without), so the
+-- request count is the cost that matters. ceil(n/100) is the floor.
+local function costCase(label, repos, limit, min_stars)
+    local r = run(repos, { min_stars = min_stars })
+    local want = expectedCount(repos, min_stars)
+    check(label .. ": all collected", r.unique, want)
+    check(label .. ": never asked past 1000", r.gh.rejected, 0)
+    check(string.format("%s: at most %d requests (floor %d, took %d)", label, limit,
+        math.ceil(want / 100), r.gh.calls), r.gh.calls <= limit, true)
+end
+
+costCase("snapshot non-fork", loadSnapshot("nonfork"), 13)
+costCase("snapshot forks incl. 0-star", loadSnapshot("fork"), 17)
+costCase("snapshot forks, starred only", loadSnapshot("fork"), 2, 1)
+costCase("100k skewed to recent years", makeRepos(100000, 0.6, 21, 3), 1085)
+costCase("20k evenly spread", makeRepos(20000, 0.5, 22, 1), 216)
+costCase("20k skewed, stars with the old", makeRepos(20000, 0.5, 24, 3, true), 222)
 
 -- ── Every repo with the same star count ─────────────────────────────────────
 do

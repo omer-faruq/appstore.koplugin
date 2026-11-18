@@ -1,4 +1,4 @@
--- 393 unique strings
+-- 394 unique strings
 return {
     ["This will take effect on next restart."] = "This will take effect on next restart.",
     ["Restart now"] = "Restart now",
@@ -393,6 +393,7 @@ Changes will take effect after restart.",
     ["README: %s/%s"] = "README: %s/%s",
     ["GitHub API rate limit exceeded. Please wait a few minutes and try again."] = "GitHub API rate limit exceeded. Please wait a few minutes and try again.",
     ["GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min)."] = "GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min).",
+    ["GitHub rate limit reached. Continuing in %d s…"] = "GitHub rate limit reached. Continuing in %d s…",
     ["GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."] = "GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README).",
     ["Saving to the cache…"] = "Saving to the cache…",
     ["Refreshing patches…"] = "Refreshing patches…",

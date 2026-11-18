@@ -242,6 +242,19 @@ ecosystem — but that also means it will not notice:
 Both gaps close automatically at the next full refresh, so any drift is bounded by the
 configured interval, not permanent.
 
+### Large searches and GitHub's limits
+
+- GitHub's search returns at most 1000 results per query. When a query matches more,
+  the refresh splits it by creation date on its own, down to the second if it has to,
+  so nothing is left out however many repositories match. It costs about one request
+  per hundred repositories.
+- The search rate limit is counted per minute (10 requests without a token, 30 with).
+  A refresh that runs into it waits for the window to reopen — the dialog shows
+  "GitHub rate limit reached. Continuing in N s…" — and carries on; Back still stops
+  it. Only a longer wait (the hourly limit) ends the refresh with the rate-limit message.
+- GitHub server errors (5xx) are retried twice, after 1 and 3 seconds. Timeouts are
+  not: on a network that is down, retrying would only keep the screen busy longer.
+
 ### Accessing the settings
 
 1. Open the **Plugins** or **Patches** browser.

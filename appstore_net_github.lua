@@ -35,8 +35,38 @@ local function getAuthHeaders()
     }
 end
 
-local function request(path, query)
+-- Seconds to wait before each retry of a 5xx. GitHub's server errors are nearly always
+-- passing -- a search that ran out of time on their side, a deploy -- and gone on the next
+-- try. Timeouts and refused connections are not retried: on a network that is down, each
+-- retry would only hold the interface up for another full timeout.
+GitHubClient.SERVER_ERROR_RETRY_DELAYS = { 1, 3 }
+
+-- How a retry waits. A field so the refresh can swap in a wait that keeps reading input
+-- (Back still stops it), and the tests one that does not wait at all.
+function GitHubClient.wait(seconds)
+    require("ffi/util").sleep(seconds)
+end
+
+local function requestOnce(target, headers)
     local response_body = {}
+    -- Without a deadline a single stalled connection hangs the interface for good: every
+    -- one of these runs on the UI thread. The API answers in well under a second when it
+    -- answers at all, so the large-content values are already generous.
+    local code, response_headers, status = Net.requestToTable({
+        url = target,
+        headers = headers,
+    }, response_body)
+    if not code then
+        return status, "", {}
+    end
+    -- A timeout reports itself as a string where a status would be. Callers only ever
+    -- compare against 200, so passing it through keeps them working and names the reason
+    -- in their logs instead of turning it into a bare nil.
+    return tonumber(code) or code, table.concat(response_body), response_headers or {}
+end
+
+-- Returns `code, body, headers`; header names are lower-case, as luasocket gives them.
+local function request(path, query)
     local target = BASE_URL .. path
     if query and query ~= "" then
         target = target .. "?" .. query
@@ -52,21 +82,35 @@ local function request(path, query)
             headers[key] = value
         end
     end
-    -- Without a deadline a single stalled connection hangs the interface for good: every
-    -- one of these runs on the UI thread. The API answers in well under a second when it
-    -- answers at all, so the large-content values are already generous.
-    local code, _, status = Net.requestToTable({
-        url = target,
-        headers = headers,
-    }, response_body)
-    if not code then
-        return status, ""
+    local code, body, response_headers = requestOnce(target, headers)
+    for _, delay in ipairs(GitHubClient.SERVER_ERROR_RETRY_DELAYS) do
+        if type(code) ~= "number" or code < 500 or code > 599 then
+            break
+        end
+        logger.warn("AppStore: GitHub server error, retrying in", delay, "s:", code, target)
+        GitHubClient.wait(delay)
+        code, body, response_headers = requestOnce(target, headers)
     end
-    local body = table.concat(response_body)
-    -- A timeout reports itself as a string where a status would be. Callers only ever
-    -- compare against 200, so passing it through keeps them working and names the reason
-    -- in their logs instead of turning it into a bare nil.
-    return tonumber(code) or code, body
+    return code, body, response_headers
+end
+
+-- How long to wait out the rate limit behind `err_info` (from searchRepositories), in
+-- seconds from `now`, or nil when GitHub did not say. Retry-After comes with the secondary
+-- limits; X-RateLimit-Reset with the primary one, as the epoch second the window reopens.
+function GitHubClient.rateLimitDelay(err_info, now)
+    if type(err_info) ~= "table" or not err_info.is_rate_limit then
+        return nil
+    end
+    local retry_after = tonumber(err_info.retry_after)
+    if retry_after then
+        return math.max(1, math.ceil(retry_after))
+    end
+    local reset_at = tonumber(err_info.reset_at)
+    if reset_at then
+        -- One second past the reset: GitHub's clock and ours are not the same clock.
+        return math.max(1, reset_at - (now or os.time()) + 1)
+    end
+    return nil
 end
 
 local function buildQuery(opts)
@@ -108,7 +152,7 @@ function GitHubClient.searchRepositories(opts)
         return { items = {}, total_count = 0 }, nil
     end
     local query = buildQuery(opts)
-    local code, body = request("/search/repositories", query)
+    local code, body, response_headers = request("/search/repositories", query)
     if code ~= 200 then
         logger.warn("GitHub search error", code, body)
         -- GitHub's search endpoint rejects fine-grained PATs outright (they're
@@ -122,6 +166,9 @@ function GitHubClient.searchRepositories(opts)
             body = body,
             is_rate_limit = (code == 403 or code == 429) and not is_fine_grained_unsupported,
             is_fine_grained_unsupported = is_fine_grained_unsupported,
+            -- For rateLimitDelay, so a caller can wait the limit out instead of failing.
+            retry_after = response_headers["retry-after"],
+            reset_at = response_headers["x-ratelimit-reset"],
         }
         return nil, err_info
     end

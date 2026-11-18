@@ -339,6 +339,7 @@ return {
     ["README download failed: "] = "Falha no download do README: ",
     ["GitHub API rate limit exceeded. Please wait a few minutes and try again."] = "Limite de taxa da API do GitHub excedido. Aguarde alguns minutos e tente novamente.",
     ["GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min)."] = "Limite de taxa da API do GitHub excedido. Adicione um token do GitHub nas configurações da AppStore para aumentar o limite (10→30 req/min).",
+    ["GitHub rate limit reached. Continuing in %d s…"] = "Limite de requisições do GitHub atingido. Continuando em %d s…",
     ["GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."] = "O GitHub rejeitou esta solicitação: tokens de acesso pessoal refinados não são suportados para pesquisa. Use um token clássico em vez disso (consulte o README da AppStore).",
     ["Cached %s plugins."] = "%s plugins em cache.",
     ["Cached %s patch repositories."] = "%s repositórios de patches em cache.",

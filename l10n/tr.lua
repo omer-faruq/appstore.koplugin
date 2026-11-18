@@ -339,6 +339,7 @@ return {
     ["README download failed: "] = "README indirilemedi: ",
     ["GitHub API rate limit exceeded. Please wait a few minutes and try again."] = "GitHub API hız sınırı aşıldı. Lütfen birkaç dakika bekleyip yeniden deneyin.",
     ["GitHub API rate limit exceeded. Add a GitHub token in AppStore settings to increase the limit (10→30 req/min)."] = "GitHub API hız sınırı aşıldı. Sınırı artırmak için AppStore ayarlarından bir GitHub belirteci ekleyin (10→30 istek/dk).",
+    ["GitHub rate limit reached. Continuing in %d s…"] = "GitHub hız sınırına ulaşıldı. %d sn sonra devam edilecek…",
     ["GitHub rejected this request: fine-grained personal access tokens are not supported for search. Please use a classic token instead (see the AppStore README)."] = "GitHub bu isteği reddetti: ince ayrıntılı kişisel erişim belirteçleri arama için desteklenmiyor. Lütfen bunun yerine klasik bir belirteç kullanın (AppStore README'ye bakın).",
     ["Cached %s plugins."] = "%s eklenti önbelleğe alındı.",
     ["Cached %s patch repositories."] = "%s yama deposu önbelleğe alındı.",
